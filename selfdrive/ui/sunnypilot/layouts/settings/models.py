@@ -103,9 +103,18 @@ class ModelsLayout(Widget):
     if lagd_toggle:
       desc += f"<br>{tr('Live Steer Delay:')} {ui_state.sm['liveDelay'].lateralDelay:.3f} s"
     elif ui_state.CP is not None:
-      sw = float(ui_state.params.get("LagdToggleDelay", "0.2"))
-      cp = ui_state.CP.steerActuatorDelay
-      desc += f"<br>{tr('Actuator Delay:')} {cp:.2f} s + {tr('Software Delay:')} {sw:.2f} s = {tr('Total Delay:')} {cp + sw:.2f} s"
+      # BluePilot: Ford uses its own per-mode manual delay (BluePilot vehicle settings ->
+      # Lateral Tuning -> Steer Actuator Delay); the generic Actuator+Software formula below
+      # does not apply, so show the value that's actually in effect instead.
+      if ui_state.CP.brand == "ford":
+        from opendbc.sunnypilot.car.ford.lagd_ext import get_manual_steer_delay
+        ford_delay = get_manual_steer_delay(ui_state.CP, ui_state.params, ui_state.CP.steerActuatorDelay)
+        desc += f"<br>{tr('Steer Delay (BluePilot, per mode):')} {ford_delay:.2f} s"
+      # End BluePilot
+      else:
+        sw = float(ui_state.params.get("LagdToggleDelay", "0.2"))
+        cp = ui_state.CP.steerActuatorDelay
+        desc += f"<br>{tr('Actuator Delay:')} {cp:.2f} s + {tr('Software Delay:')} {sw:.2f} s = {tr('Total Delay:')} {cp + sw:.2f} s"
     self.lagd_toggle.set_description(desc)
 
   def _is_downloading(self):
@@ -236,7 +245,11 @@ class ModelsLayout(Widget):
     self.lane_turn_desire_toggle.action_item.set_state(turn_desire)
     self.lane_turn_value_control.set_visible(turn_desire and advanced_controls)
     self.lagd_toggle.action_item.set_state(live_delay)
-    self.delay_control.set_visible(not live_delay and advanced_controls)
+    # BluePilot: Ford has its own per-mode delay override (Steer Actuator Delay in the
+    # BluePilot menu); hide the generic control here rather than leave it live-looking but inert.
+    is_ford = ui_state.CP is not None and ui_state.CP.brand == "ford"
+    self.delay_control.set_visible(not live_delay and advanced_controls and not is_ford)
+    # End BluePilot
     new_step = int(round(100 / CV.MPH_TO_KPH)) if ui_state.is_metric else 100
     if self.lane_turn_value_control.action_item.value_change_step != new_step:
       self.lane_turn_value_control.action_item.value_change_step = new_step
