@@ -27,9 +27,14 @@ class LagdToggle:
     self.read_params()
 
     if not self.lagd_toggle:
-      steer_actuator_delay = self.CP.steerActuatorDelay
-      delay = self.software_delay
-      self.lag = (steer_actuator_delay + delay)
+      # BluePilot: Ford curvature/angle-primary lateral control can need different manual
+      # delay (different PSCM signal path); use the per-mode override instead of one shared value.
+      if self.CP.brand == "ford":
+        from opendbc.sunnypilot.car.ford.lagd_ext import get_manual_steer_delay
+        self.lag = get_manual_steer_delay(self.CP, self.params, self.CP.steerActuatorDelay + self.software_delay)
+      else:
+        self.lag = self.CP.steerActuatorDelay + self.software_delay
+      # End BluePilot
       self.params.put("LagdValueCache", self.lag)
       return
 

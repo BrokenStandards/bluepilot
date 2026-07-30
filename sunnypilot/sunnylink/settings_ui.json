@@ -2535,6 +2535,33 @@
           ]
         },
         {
+          "key": "FordSteerActDelayAng",
+          "widget": "option",
+          "title": "[Lateral Tuning] Steer Actuator Delay (Angle)",
+          "description": "Manual actuator delay used in angle mode when Live Learning Steer Delay (Models page) is off. Angle steering is faster than curvature and typically needs a shorter delay.",
+          "min": 0.15,
+          "max": 0.6,
+          "step": 0.01,
+          "unit": "s",
+          "visibility": [
+            {
+              "type": "param",
+              "key": "FordPrefLateralControl",
+              "equals": 1
+            }
+          ],
+          "enablement": [
+            {
+              "type": "not",
+              "condition": {
+                "type": "param",
+                "key": "LagdToggle",
+                "equals": true
+              }
+            }
+          ]
+        },
+        {
           "key": "FordLowSpeedFactor_ang",
           "widget": "option",
           "title": "[Lateral Tuning] Low Speed Adjustment Factor (Angle)",
@@ -2595,6 +2622,33 @@
               "type": "param",
               "key": "FordPrefLateralControl",
               "equals": 1
+            }
+          ]
+        },
+        {
+          "key": "FordSteerActDelayCurv",
+          "widget": "option",
+          "title": "[Lateral Tuning] Steer Actuator Delay (Curvature)",
+          "description": "Manual actuator delay used in curvature mode when Live Learning Steer Delay (Models page) is off.",
+          "min": 0.15,
+          "max": 0.6,
+          "step": 0.01,
+          "unit": "s",
+          "visibility": [
+            {
+              "type": "param",
+              "key": "FordPrefLateralControl",
+              "equals": 0
+            }
+          ],
+          "enablement": [
+            {
+              "type": "not",
+              "condition": {
+                "type": "param",
+                "key": "LagdToggle",
+                "equals": true
+              }
             }
           ]
         },

@@ -336,6 +336,18 @@ class BluePilotLayout(Widget):
       icon="warning.png"
     )
 
+    self._steer_act_delay_curv = float_control_item(
+      lambda: tr("Steer Actuator Delay (Curvature)"),
+      lambda: tr("Manual actuator delay used in curvature mode when Live Learning Steer Delay (Models page) is off."),
+      param="FordSteerActDelayCurv",
+      min_value=0.15,
+      max_value=0.60,
+      step=0.01,
+      suffix="s",
+      enabled=lambda: not self._safe_get_bool(ui_state.params, "LagdToggle"),
+      icon="chffr_wheel.png"
+    )
+
     # Human turn detection toggle
     self._enable_human_turn_detection = toggle_item(
       lambda: tr("Enable Human Turn Detection"),
@@ -514,6 +526,17 @@ class BluePilotLayout(Widget):
       selected_index=primary_lat_idx,
       icon="chffr_wheel.png"
     )
+    self._steer_act_delay_ang = float_control_item(
+      lambda: tr("Steer Actuator Delay (Angle)"),
+      lambda: tr("Manual actuator delay used in angle mode when Live Learning Steer Delay (Models page) is off. Angle steering is faster than curvature and typically needs a shorter delay."),
+      param="FordSteerActDelayAng",
+      min_value=0.15,
+      max_value=0.60,
+      step=0.01,
+      suffix="s",
+      enabled=lambda: not self._safe_get_bool(ui_state.params, "LagdToggle"),
+      icon="chffr_wheel.png"
+    )
     self._low_speed_curv_factor = float_control_item(
       lambda: tr("Low Speed Adjustment Factor"),
       lambda: tr("Scales the low-speed steering response in angle mode. Adjust for personal feel. Default 1.0."),
@@ -621,6 +644,7 @@ class BluePilotLayout(Widget):
 
     # Angle Tuning: nested collapsible sub-section, angle-mode-only tuning items
     angle_items = [
+      self._steer_act_delay_ang,
       self._low_speed_curv_factor,
       self._high_speed_curv_factor,
       self._high_speed_dampening,
@@ -632,6 +656,7 @@ class BluePilotLayout(Widget):
 
     # Curvature Tuning: nested collapsible sub-section, curvature-mode-only tuning items
     curv_items = [
+      self._steer_act_delay_curv,
       self._enable_human_turn_detection,
       self._lane_change_factor_high_curv,
       self._enable_lane_positioning,

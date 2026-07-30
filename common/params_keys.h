@@ -310,6 +310,10 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"FordLowSpeedFactor_ang", {PERSISTENT | BACKUP, FLOAT, "1.0"}},
     {"FordHighSpeedFactor_ang", {PERSISTENT | BACKUP, FLOAT, "1.0"}},
     {"FordHighSpeedDampening_ang", {PERSISTENT | BACKUP, FLOAT, "1.0"}},
+    // Manual steer actuator delay per lateral control scheme; only used when LagdToggle
+    // (Live Learning Steer Delay) is off -- see sunnypilot/livedelay/lagd_toggle.py
+    {"FordSteerActDelayCurv", {PERSISTENT | BACKUP, FLOAT, "0.42"}},
+    {"FordSteerActDelayAng", {PERSISTENT | BACKUP, FLOAT, "0.42"}},
     {"BPLateralSchemeParamsMigratedV1", {PERSISTENT | BACKUP, STRING, "0"}},
 
     {"disable_BP_lat_UI", {PERSISTENT | BACKUP, BOOL, "0"}},

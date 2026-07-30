@@ -16,6 +16,9 @@ class LateralLayoutMici(NavScroller):
       self.set_back_callback(back_callback)
 
     # --- Angle-mode-only items ---
+    self.steer_act_delay_ang = BigParamFloatControl(
+      "Steer Actuator Delay (Angle)", "FordSteerActDelayAng", min=0.15, max=0.60, step=0.01,
+    )
     self.low_speed_factor = BigParamFloatControl(
       "Low Speed Adjustment Factor", "FordLowSpeedFactor_ang", min=0.5, max=1.5, step=0.01,
     )
@@ -41,6 +44,9 @@ class LateralLayoutMici(NavScroller):
     self.show_lateral_control = BigParamControlBP("Show Lateral Control Mode", "BpShowLateralControl")
 
     # --- Curvature-mode-only items ---
+    self.steer_act_delay_curv = BigParamFloatControl(
+      "Steer Actuator Delay (Curvature)", "FordSteerActDelayCurv", min=0.15, max=0.60, step=0.01,
+    )
     self.lane_change_factor_high_curv = BigParamFloatControl(
       "Lane Change Factor High", "lane_change_factor_high_curv", min=0.5, max=1.0,
     )
@@ -70,12 +76,14 @@ class LateralLayoutMici(NavScroller):
     )
 
     self._scroller.add_widgets([
+      self.steer_act_delay_ang,
       self.low_speed_factor,
       self.high_speed_factor,
       self.high_speed_dampening,
       self.lane_change_factor_high_ang,
       self.disable_lane_change_under_speed,
       self.blinker_min_speed,
+      self.steer_act_delay_curv,
       self.lane_change_factor_high_curv,
       self.enable_human_turn_detection,
       self.custom_path_offset,
@@ -116,6 +124,11 @@ class LateralLayoutMici(NavScroller):
     self.high_speed_factor.set_visible(is_angle)
     self.high_speed_dampening.set_visible(is_angle)
     self.lane_change_factor_high_ang.set_visible(is_angle)
+    self.steer_act_delay_ang.set_visible(is_angle)
+    self.steer_act_delay_curv.set_visible(is_curv)
+    live_learning = ui_state.params.get_bool("LagdToggle")
+    self.steer_act_delay_ang.set_enabled(not live_learning)
+    self.steer_act_delay_curv.set_enabled(not live_learning)
     self.blinker_min_speed.set_enabled(ui_state.params.get_bool("BlinkerPauseLaneChange"))
     for item in (
       self.lane_change_factor_high_curv,
