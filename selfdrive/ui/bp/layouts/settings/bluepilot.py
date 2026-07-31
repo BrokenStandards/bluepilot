@@ -550,6 +550,18 @@ class BluePilotLayout(Widget):
       icon="chffr_wheel.png"
     )
 
+    # ACC coasting mode: legacy (original BP thresholds) vs extended (Ford factory coast band)
+    coasting_mode_idx = int(self._params.get("FordPrefCoastingMode", return_default=True) or 0)
+    self._coasting_mode_btn = multiple_button_item(
+      lambda: tr("Coasting Mode"),
+      lambda: tr("Legacy brakes beyond -0.14 m/s². Extended restores the stock Ford coast band, coasting on engine braking/regen down to -0.45 m/s²."),
+      buttons=[lambda: tr("Legacy"), lambda: tr("Extended")],
+      button_width=225,
+      callback=self._set_coasting_mode,
+      selected_index=coasting_mode_idx,
+      icon="chffr_wheel.png"
+    )
+
     # Disable downhill compensation toggle
     self._disable_dowhill_comp = toggle_item(
       lambda: tr("Disable Downhill Compensation"),
@@ -691,6 +703,7 @@ class BluePilotLayout(Widget):
       ]) +
       _section(tr("Longitudinal Tuning"), [
         self._disable_BP_long,
+        self._coasting_mode_btn,
         self._disable_dowhill_comp,
         self._disable_ford_radar,
       ]) +
@@ -851,6 +864,8 @@ class BluePilotLayout(Widget):
     self._hybrid_gauge_style_btn.action_item.set_selected_button(style_idx)
     plat_idx = PrimaryLateralControl(ui_state.params.get("FordPrefLateralControl", return_default=True) or 0)
     self._primary_lateral_control_btn.action_item.set_selected_button(plat_idx)
+    coasting_idx = int(ui_state.params.get("FordPrefCoastingMode", return_default=True) or 0)
+    self._coasting_mode_btn.action_item.set_selected_button(coasting_idx)
     custom_prof = fresh.get("custom_profile_curv") if "custom_profile_curv" in fresh else self._safe_get_bool(ui_state.params, "custom_profile_curv")
     lane_pos = fresh.get("enable_lane_positioning_curv") if "enable_lane_positioning_curv" in fresh else self._safe_get_bool(ui_state.params, "enable_lane_positioning_curv")
     pause_lc = fresh.get("BlinkerPauseLaneChange") if "BlinkerPauseLaneChange" in fresh else self._safe_get_bool(ui_state.params, "BlinkerPauseLaneChange")
@@ -1051,6 +1066,14 @@ class BluePilotLayout(Widget):
   def _set_primary_lateral_control(self, button_index: int):
     try:
       self._params.put("FordPrefLateralControl", int(PrimaryLateralControl(button_index)))
+    except UnknownKeyName:
+      pass
+    self._update_toggles()
+
+  def _set_coasting_mode(self, button_index: int):
+    """Handle ACC coasting mode: 0 = Legacy, 1 = Extended."""
+    try:
+      self._params.put("FordPrefCoastingMode", int(button_index))
     except UnknownKeyName:
       pass
     self._update_toggles()

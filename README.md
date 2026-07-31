@@ -190,6 +190,7 @@ The following settings are available in the BluePilot menu:
 
 **Longitudinal Tuning:**
 * Bypass BP Longitudinal Control
+* Coasting Mode (Legacy / Extended — Extended restores the stock Ford coast band: decel up to -0.45 m/s² rides the propulsion channel as engine braking/regen before the friction brakes engage)
 * Disable Downhill Compensation
 * Disable Ford Radar (Vision-Only Leads)
 

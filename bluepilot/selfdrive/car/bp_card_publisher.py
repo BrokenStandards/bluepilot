@@ -97,6 +97,7 @@ def _refresh_settings_cache() -> dict:
     "bmsBypassBpLongitudinalControl":  _get_bool(p, "disable_BP_long_UI"),
     "bmsDisableDownhillCompensation":  _get_bool(p, "disable_downhill_comp_UI"),
     "bmsDisableFordRadarVisionOnly":   _get_bool(p, "disable_ford_radar_UI"),
+    "bmsFordCoastingMode":             _get_int(p, "FordPrefCoastingMode", 0),
     # --- Lateral Tuning ---
     "bmsDisableBpLateralControl":      _get_bool(p, "disable_BP_lat_UI"),
     "bmsPrimaryControlVariable":       _get_int(p, "FordPrefLateralControl", 0),
@@ -131,6 +132,22 @@ def publish_controller_state_bp(CI, pm):
     cs_bp.curvatureDeviationLimited = getattr(CI.CC, "curvatureDeviationLimited", False)
     cs_bp.humanTurnLateralPaused = bool(getattr(CI.CC, "humanTurnLateralPaused", False))
     cs_bp.stallBlipActive = bool(getattr(CI.CC, "stallBlipActive", False))
+
+    # BluePilot: per-frame longitudinal coasting diagnostics (set by LongitudinalExt.update
+    # at 50Hz; getattr defaults keep non-Ford / pre-first-update frames safe).
+    cs_bp.longCoastingMode = int(getattr(CI.CC, "longCoastingMode", 0))
+    cs_bp.longBpLongUsed = bool(getattr(CI.CC, "longBpLongUsed", False))
+    cs_bp.longBrakeActuate = bool(getattr(CI.CC, "longBrakeActuate", False))
+    cs_bp.longPrechargeActuate = bool(getattr(CI.CC, "longPrechargeActuate", False))
+    cs_bp.longLeadState = int(getattr(CI.CC, "longLeadState", 0))
+    cs_bp.longOpAccel = float(getattr(CI.CC, "longOpAccel", 0.0))
+    cs_bp.longBpAccel = float(getattr(CI.CC, "longBpAccel", 0.0))
+    cs_bp.longOpGas = float(getattr(CI.CC, "longOpGas", 0.0))
+    cs_bp.longBpGas = float(getattr(CI.CC, "longBpGas", 0.0))
+    cs_bp.longAccelPitch = float(getattr(CI.CC, "longAccelPitch", 0.0))
+    cs_bp.longTtcSec = float(getattr(CI.CC, "longTtcSec", 0.0))
+    cs_bp.longLeadTimeSec = float(getattr(CI.CC, "longLeadTimeSec", 0.0))
+    cs_bp.longCoasting = bool(getattr(CI.CC, "longCoasting", False))
 
     # BluePilot: settings snapshot -- refreshed at most every _SETTINGS_INTERVAL s so Params
     # reads don't add latency to every card.py tick.

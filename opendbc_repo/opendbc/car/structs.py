@@ -240,3 +240,19 @@ class ControllerStateBP:
   # --- Fingerprint ---
   bmsFingerprintForced: bool = False
   bmsFingerprint: str = ""
+  # --- Longitudinal Tuning (appended) ---
+  bmsFordCoastingMode: int = 0
+  # BluePilot: per-frame longitudinal coasting diagnostics from Ford LongitudinalExt (50Hz)
+  longCoastingMode: int = 0
+  longBpLongUsed: bool = False
+  longBrakeActuate: bool = False
+  longPrechargeActuate: bool = False
+  longLeadState: int = 0
+  longOpAccel: float = 0.0
+  longBpAccel: float = 0.0
+  longOpGas: float = 0.0
+  longBpGas: float = 0.0
+  longAccelPitch: float = 0.0
+  longTtcSec: float = 0.0
+  longLeadTimeSec: float = 0.0
+  longCoasting: bool = False

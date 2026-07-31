@@ -315,6 +315,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"disable_BP_long_UI", {PERSISTENT | BACKUP, BOOL, "0"}},
     {"disable_downhill_comp_UI", {PERSISTENT | BACKUP, BOOL, "0"}},
     {"disable_ford_radar_UI", {PERSISTENT | BACKUP, BOOL, "0"}},
+    {"FordPrefCoastingMode", {PERSISTENT | BACKUP, INT, "0"}},  // ACC coasting: 0=legacy (brake bit < -0.14), 1=extended (Ford factory coast band, brake bit < -0.45)
     {"vbatt_pause_charging", {PERSISTENT | BACKUP, FLOAT, "11.8"}},
     {"show_lead_speed", {PERSISTENT | BACKUP, BOOL, "1"}},
     {"FordPrefSteerAngleCurvature", {PERSISTENT | BACKUP, BOOL, "0"}},  // pinion-sourced curvature measurement (bad-yaw-sensor workaround); read at car init

@@ -2478,6 +2478,22 @@
           "description": "Use stock longitudinal logic instead of BluePilot TTC/coasting tuning."
         },
         {
+          "key": "FordPrefCoastingMode",
+          "widget": "multiple_button",
+          "title": "[Longitudinal Tuning] Coasting Mode",
+          "description": "Legacy engages friction brakes beyond -0.14 m/s2. Extended restores the stock Ford coast band, coasting on engine braking/regen down to -0.45 m/s2 before the brakes engage.",
+          "options": [
+            {
+              "value": 0,
+              "label": "Legacy"
+            },
+            {
+              "value": 1,
+              "label": "Extended"
+            }
+          ]
+        },
+        {
           "key": "disable_downhill_comp_UI",
           "widget": "toggle",
           "title": "[Longitudinal Tuning] Disable Downhill Compensation",
