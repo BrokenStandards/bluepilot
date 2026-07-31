@@ -41,7 +41,9 @@ def python_stack_procs():
 def main():
   out_dir = sys.argv[1]
   duration = sys.argv[2] if len(sys.argv) > 2 else "30"
-  rate = sys.argv[sys.argv.index("--rate") + 1] if "--rate" in sys.argv else "100"
+  # 99 Hz, not 100: a sampler synchronized with the stack's 100Hz loop rate aliases
+  # (BEST_PRACTICES.md section 4; Gregg's tools use off-round rates for the same reason)
+  rate = sys.argv[sys.argv.index("--rate") + 1] if "--rate" in sys.argv else "99"
   os.makedirs(out_dir, exist_ok=True)
 
   procs = python_stack_procs()
