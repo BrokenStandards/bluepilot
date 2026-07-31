@@ -16,9 +16,7 @@ from opendbc.sunnypilot.car.ford.longitudinal_ext import (
   LongitudinalExt,
   COASTING_MODE_LEGACY,
   COASTING_MODE_EXTENDED,
-  LEAD_STATE_GAINING,
-  LEAD_STATE_NONE,
-  LEAD_STATE_PACING,
+  PARAM_REFRESH_FRAMES,
 )
 
 INACTIVE_GAS = CarControllerParams.INACTIVE_GAS  # -5.0
@@ -119,7 +117,6 @@ class TestLegacyModeUnchanged(unittest.TestCase):
     _prime_speed_allow(ext)
     res = _update(ext, -0.6, op_gas=INACTIVE_GAS)
     self.assertTrue(res.bp_long_used)
-    self.assertEqual(ext.longLeadState, LEAD_STATE_PACING)
     self.assertEqual(res.gas, 0.0)
 
   def test_legacy_no_lead_pins_accel_to_zero(self):
@@ -128,7 +125,6 @@ class TestLegacyModeUnchanged(unittest.TestCase):
     res = _update(ext, -1.0, op_gas=INACTIVE_GAS)
     self.assertTrue(res.bp_long_used)
     self.assertEqual(res.accel, 0.0)  # pinned: holds speed where the planner wanted decel
-    self.assertEqual(ext.longLeadState, LEAD_STATE_NONE)
 
   def test_legacy_roc_limits_decel_onset(self):
     # bp_accel_last seeds at 0.0; a -1.0 request only moves 0.002 per scan (0.1 m/s^3)
@@ -167,7 +163,6 @@ class TestLegacyModeUnchanged(unittest.TestCase):
     _prime_speed_allow(ext)
     res = _update(ext, -1.0, op_gas=INACTIVE_GAS)
     self.assertTrue(res.bp_long_used)
-    self.assertEqual(ext.longLeadState, LEAD_STATE_NONE)
     self.assertEqual(res.accel, 0.0)  # legacy no-lead pin, same as leadOne=None
 
   def test_radar_invalid_treated_as_no_lead(self):
@@ -175,7 +170,7 @@ class TestLegacyModeUnchanged(unittest.TestCase):
     _prime_speed_allow(ext)
     res = _update(ext, -1.0, op_gas=INACTIVE_GAS)
     self.assertTrue(res.bp_long_used)
-    self.assertEqual(ext.longLeadState, LEAD_STATE_NONE)
+    self.assertEqual(res.accel, 0.0)  # legacy no-lead pin
 
   def test_speed_deadband_hysteresis(self):
     # primed above 50 mph, then dropping into the 45-50 deadband holds BP long
@@ -197,7 +192,6 @@ class TestLegacyModeUnchanged(unittest.TestCase):
       ext = _make_ext(mode=mode, lead=_lead(d_rel=108.0, v_rel=-0.2, v_lead=26.8))
       _prime_speed_allow(ext)
       res = _update(ext, 0.5, op_gas=0.5)
-      self.assertEqual(ext.longLeadState, LEAD_STATE_GAINING)
       self.assertTrue(res.bp_long_used)
       self.assertEqual(res.gas, 0.5)
 
@@ -225,7 +219,6 @@ class TestExtendedCoastBand(unittest.TestCase):
     self.assertFalse(res.precharge_actuate)
     self.assertEqual(res.gas, -0.3)
     self.assertEqual(res.accel, -0.3)
-    self.assertTrue(ext.longCoasting)
 
   def test_extended_deep_decel_brakes(self):
     ext = _make_ext(mode=COASTING_MODE_EXTENDED)
@@ -233,7 +226,6 @@ class TestExtendedCoastBand(unittest.TestCase):
     res = _update(ext, -0.6)
     self.assertTrue(res.brake_actuate)
     self.assertTrue(res.precharge_actuate)
-    self.assertFalse(ext.longCoasting)
 
   def test_extended_brake_hysteresis_band(self):
     ext = _make_ext(mode=COASTING_MODE_EXTENDED)
@@ -286,7 +278,6 @@ class TestExtendedCoastBand(unittest.TestCase):
     ext = _make_ext(mode=COASTING_MODE_EXTENDED, lead=_lead(d_rel=27.0, v_rel=-0.5, v_lead=26.5))
     _prime_speed_allow(ext)
     res = _update(ext, 0.4, op_gas=0.4)
-    self.assertEqual(ext.longLeadState, LEAD_STATE_GAINING)
     self.assertEqual(res.gas, 0.0)
 
   def test_extended_no_lead_passthrough(self):
@@ -431,21 +422,56 @@ class TestSafetyEnvelope(unittest.TestCase):
       self.assertEqual(res.accel_pred_send, INACTIVE_GAS)
 
 
-class TestDiagnostics(unittest.TestCase):
-  def test_diagnostics_populated(self):
-    ext = _make_ext(mode=COASTING_MODE_EXTENDED, lead=_lead(d_rel=54.0, v_rel=-1.0, v_lead=26.0))
-    _prime_speed_allow(ext)
-    res = _update(ext, -0.3, op_gas=-0.3)
-    self.assertEqual(ext.longCoastingMode, COASTING_MODE_EXTENDED)
-    self.assertEqual(ext.longLeadState, LEAD_STATE_GAINING)
-    self.assertEqual(ext.longBrakeActuate, res.brake_actuate)
-    self.assertEqual(ext.longPrechargeActuate, res.precharge_actuate)
-    self.assertEqual(ext.longBpAccel, res.accel)
-    self.assertEqual(ext.longBpGas, res.gas)
-    self.assertEqual(ext.longOpAccel, -0.3)
-    self.assertAlmostEqual(ext.longTtcSec, 54.0, places=3)
-    self.assertAlmostEqual(ext.longLeadTimeSec, 2.0, places=3)
-    self.assertEqual(ext.longBpLongUsed, res.bp_long_used)
+class _CountingParams:
+  """Counts param reads so the refresh throttle can be pinned."""
+
+  def __init__(self, values=None):
+    self.values = values or {}
+    self.reads = 0
+
+  def get_bool(self, key):
+    self.reads += 1
+    return bool(self.values.get(key, False))
+
+  def get(self, key, return_default=False):
+    self.reads += 1
+    return self.values.get(key, 0)
+
+
+class TestParamRefreshThrottle(unittest.TestCase):
+  """Params are files on disk; update_long_params runs at 100Hz so reads are throttled."""
+
+  def test_reads_on_first_call_then_throttles(self):
+    ext = _make_ext()
+    p = _CountingParams({"FordPrefCoastingMode": 1})
+    ext.update_long_params(p)
+    # applied immediately on the first frame -- no window of stale defaults
+    self.assertEqual(ext.coasting_mode, COASTING_MODE_EXTENDED)
+    first = p.reads
+    self.assertGreater(first, 0)
+    # the next PARAM_REFRESH_FRAMES-1 calls must not touch the disk
+    for _ in range(PARAM_REFRESH_FRAMES - 1):
+      ext.update_long_params(p)
+    self.assertEqual(p.reads, first)
+    # ...and then exactly one more refresh
+    ext.update_long_params(p)
+    self.assertEqual(p.reads, 2 * first)
+
+  def test_refreshed_value_is_picked_up(self):
+    ext = _make_ext()
+    p = _CountingParams({"FordPrefCoastingMode": 0})
+    ext.update_long_params(p)
+    self.assertEqual(ext.coasting_mode, COASTING_MODE_LEGACY)
+    p.values["FordPrefCoastingMode"] = 1
+    for _ in range(PARAM_REFRESH_FRAMES):
+      ext.update_long_params(p)
+    self.assertEqual(ext.coasting_mode, COASTING_MODE_EXTENDED)
+
+  def test_unrecognized_mode_falls_back_to_legacy(self):
+    for bad in (-1, 2, 99):
+      ext = _make_ext()
+      ext.update_long_params(_CountingParams({"FordPrefCoastingMode": bad}))
+      self.assertEqual(ext.coasting_mode, COASTING_MODE_LEGACY)
 
 
 if __name__ == '__main__':

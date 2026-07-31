@@ -548,27 +548,6 @@ struct ControllerStateBP @0xcd96dafb67a082d0 {
   # --- Fingerprint (not a menu item, but requested alongside the settings snapshot) ---
   bmsFingerprintForced @52 :Bool;  # true when CarParams.fingerprintSource == fixed (CarPlatformBundle / FINGERPRINT env)
   bmsFingerprint @53 :Text;  # CarParams.carFingerprint
-
-  # --- Longitudinal Tuning (appended; belongs with the @32-@34 group) ---
-  bmsFordCoastingMode @54 :UInt8;  # FordPrefCoastingMode: 0=legacy, 1=extended
-
-  # BluePilot: per-frame longitudinal coasting diagnostics from Ford LongitudinalExt
-  # (longitudinal_ext.py; values refresh at 50Hz inside the ACC_CONTROL_STEP block).
-  # These expose the ACCDATA brake/precharge bits and the coast band state, which are
-  # otherwise only visible in raw CAN.
-  longCoastingMode @55 :UInt8;      # mode active in the controller this frame: 0=legacy, 1=extended
-  longBpLongUsed @56 :Bool;         # BP follow control applied this frame (vs stock op passthrough)
-  longBrakeActuate @57 :Bool;       # AccBrkDecel_B_Rq sent (friction brakes engaged)
-  longPrechargeActuate @58 :Bool;   # AccBrkPrchg_B_Rq sent (brake pre-charge)
-  longLeadState @59 :UInt8;         # 0=none, 1=gaining, 2=pacing, 3=trailing
-  longOpAccel @60 :Float32;         # stock openpilot accel input (m/s^2)
-  longBpAccel @61 :Float32;         # final AccBrkTot_A_Rq sent (m/s^2)
-  longOpGas @62 :Float32;           # stock openpilot gas input (m/s^2, -5.0 = inactive)
-  longBpGas @63 :Float32;           # final AccPrpl_A_Rq sent (m/s^2, -5.0 = inactive)
-  longAccelPitch @64 :Float32;      # pitch compensation term (m/s^2, 0 when downhill comp disabled and downhill)
-  longTtcSec @65 :Float32;          # time-to-collision vs lead (s, clipped to [0.2, 120])
-  longLeadTimeSec @66 :Float32;     # time headway to lead (s, 999 = no lead)
-  longCoasting @67 :Bool;           # decel carried by the propulsion channel alone (the coast band)
 }
 
 struct CarStateBP @0xb057204d7deadf3f {

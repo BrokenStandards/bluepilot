@@ -26,6 +26,11 @@ Coasting modes (FordPrefCoastingMode param, selectable in Longitudinal Tuning):
     propulsion flowing alongside the brake bits (both stock Ford ACC and
     upstream openpilot do this; the panda safety checks the bits and the accel
     value independently, see opendbc/safety/modes/ford.h).
+
+For route analysis: the active mode is in the route's initData params snapshot
+(FordPrefCoastingMode), the commanded accel/gas are in carOutput.actuatorsOutput,
+and the ACCDATA brake/precharge bits are decodable from the raw CAN in rlog
+(AccBrkDecel_B_Rq / AccBrkPrchg_B_Rq on 0x186). No extra telemetry is published.
 """
 
 from collections import namedtuple
@@ -39,11 +44,10 @@ from opendbc.car.ford.values import CarControllerParams
 COASTING_MODE_LEGACY = 0
 COASTING_MODE_EXTENDED = 1
 
-# Lead classification for the longLeadState diagnostic (controllerStateBP)
-LEAD_STATE_NONE = 0
-LEAD_STATE_GAINING = 1
-LEAD_STATE_PACING = 2
-LEAD_STATE_TRAILING = 3
+# Params are files on disk: reading them on every 100Hz carcontroller frame puts real
+# I/O in the control loop, so refresh roughly once a second instead (same pattern as
+# the BP onroad UI widgets). Menu toggles applying up to 1s later is imperceptible.
+PARAM_REFRESH_FRAMES = 100
 
 
 # Result namedtuple returned by LongitudinalExt.update()
@@ -105,32 +109,26 @@ class LongitudinalExt:
     self.ext_brake_actuate_last = False
     self.ext_precharge_actuate_last = False
 
-    # Toggles (updated from Params each frame)
+    # Toggles (updated from Params, throttled -- see PARAM_REFRESH_FRAMES)
     self.disable_BP_long_UI = False
     self.disable_downhill_comp_UI = True
     self.coasting_mode = COASTING_MODE_LEGACY  # FordPrefCoastingMode: 0=legacy, 1=extended
-
-    # Coasting diagnostics published via controllerStateBP (bp_card_publisher.py)
-    self.longCoastingMode = COASTING_MODE_LEGACY
-    self.longBpLongUsed = False
-    self.longBrakeActuate = False
-    self.longPrechargeActuate = False
-    self.longLeadState = LEAD_STATE_NONE
-    self.longOpAccel = 0.0
-    self.longBpAccel = 0.0
-    self.longOpGas = 0.0
-    self.longBpGas = 0.0
-    self.longAccelPitch = 0.0
-    self.longTtcSec = 0.0
-    self.longLeadTimeSec = 0.0
-    self.longCoasting = False
+    self._param_frame_counter = PARAM_REFRESH_FRAMES  # force a read on the first frame
 
   def update_long_params(self, params):
-    """Read longitudinal-related Params from the UI. Called each frame."""
+    """Read longitudinal-related Params from the UI.
+
+    Called every frame from CarController.update(), but the disk reads are throttled
+    to ~1Hz (see PARAM_REFRESH_FRAMES) to keep file I/O out of the 100Hz control loop.
+    """
+    self._param_frame_counter += 1
+    if self._param_frame_counter < PARAM_REFRESH_FRAMES:
+      return
+    self._param_frame_counter = 0
+
     self.disable_BP_long_UI = params.get_bool("disable_BP_long_UI")
     self.disable_downhill_comp_UI = params.get_bool("disable_downhill_comp_UI")
-    # Any unrecognized stored value falls back to legacy (also keeps the UInt8
-    # diagnostic in range for controllerStateBP)
+    # Any unrecognized stored value falls back to legacy
     mode = int(params.get("FordPrefCoastingMode", return_default=True) or COASTING_MODE_LEGACY)
     self.coasting_mode = COASTING_MODE_EXTENDED if mode == COASTING_MODE_EXTENDED else COASTING_MODE_LEGACY
 
@@ -185,14 +183,11 @@ class LongitudinalExt:
     if bpSpeedTooSlow:
       self.bpSpeedAllow = False
 
-    lead_state = LEAD_STATE_NONE
-    ttc_sec = 120.0
-    lead_time_sec = 999.0
-
     # BP longitudinal follow control
     if not self.disable_BP_long_UI:
       # Read lead vehicle data from radarState (SubMaster is on self via mixin)
       v_ego = max(CS.out.vEgo, 0.5)
+      lead_time_sec = 999.0
       lead = None
       v_rel = 0.0
       v_lead = 0.0
@@ -233,13 +228,10 @@ class LongitudinalExt:
       if lead:
         if v_rel < -0.1:
           gaining = True
-          lead_state = LEAD_STATE_GAINING
         elif v_rel > 0.1:
           trailing = True
-          lead_state = LEAD_STATE_TRAILING
         else:
           pacing = True
-          lead_state = LEAD_STATE_PACING
 
       if extended:
         # EXTENDED: gas limits are caps only. Legacy's floor of 0.0 turned a
@@ -419,22 +411,6 @@ class LongitudinalExt:
 
     self._bp_long_active_last = bp_long_used
     self.op_brake_actuate_last = op_brake_actuate
-
-    # Coasting diagnostics for controllerStateBP (published by bp_card_publisher.py)
-    self.longCoastingMode = int(self.coasting_mode)
-    self.longBpLongUsed = bool(bp_long_used)
-    self.longBrakeActuate = bool(brake_actuate)
-    self.longPrechargeActuate = bool(precharge_actuate)
-    self.longLeadState = int(lead_state)
-    self.longOpAccel = float(op_accel)
-    self.longBpAccel = float(accel)
-    self.longOpGas = float(op_gas)
-    self.longBpGas = float(gas)
-    self.longAccelPitch = float(accel_due_to_pitch)
-    self.longTtcSec = float(ttc_sec)
-    self.longLeadTimeSec = float(lead_time_sec)
-    # True while decel is being carried by the propulsion channel alone (the coast band)
-    self.longCoasting = bool(CC.longActive and accel < 0.0 and not brake_actuate)
 
     return LongitudinalResult(
       accel=accel,
