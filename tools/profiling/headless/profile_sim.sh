@@ -33,7 +33,10 @@ fi
 #    the restart churn pollutes the CPU numbers
 #  - models_manager: mid-run it can activate a model bundle and flip
 #    ModelRunnerTypeCache to tinygrad, which stops the stock modeld under us
-export BLOCK="${BLOCK},soundd,models_manager"
+#  - mapd/mapd_manager: the mapd binary is fetched on demand and can't download
+#    here; the resulting process_not_running error event keeps the stack
+#    un-engageable, so the bridge's auto-engage never fires
+export BLOCK="${BLOCK},soundd,models_manager,mapd,mapd_manager"
 
 # A stale ModelRunnerTypeCache (e.g. tinygrad, cached by a previous models_manager run
 # with no bundle actually active) stops stock modeld and leaves NO model running --
