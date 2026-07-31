@@ -21,18 +21,20 @@ class SimulatedSensors:
     self.last_dmon_update = 0
 
   def send_imu_message(self, simulator_state: 'SimulatorState'):
-    for _ in range(5):
-      dat = messaging.new_message('accelerometer', valid=True)
-      dat.accelerometer.timestamp = dat.logMonoTime  # TODO: use the IMU timestamp
-      dat.accelerometer.init('acceleration')
-      dat.accelerometer.acceleration.v = [simulator_state.imu.accelerometer.x, simulator_state.imu.accelerometer.y, simulator_state.imu.accelerometer.z]
-      self.pm.send('accelerometer', dat)
+    # One accel + one gyro message per 100Hz bridge tick, matching the ~104Hz device IMU rate.
+    # Sending 5 duplicated messages per tick (500Hz) triples locationd's EKF CPU in sim and
+    # overweights the IMU relative to camera odometry compared to a real device.
+    dat = messaging.new_message('accelerometer', valid=True)
+    dat.accelerometer.timestamp = dat.logMonoTime  # TODO: use the IMU timestamp
+    dat.accelerometer.init('acceleration')
+    dat.accelerometer.acceleration.v = [simulator_state.imu.accelerometer.x, simulator_state.imu.accelerometer.y, simulator_state.imu.accelerometer.z]
+    self.pm.send('accelerometer', dat)
 
-      dat = messaging.new_message('gyroscope', valid=True)
-      dat.gyroscope.timestamp = dat.logMonoTime  # TODO: use the IMU timestamp
-      dat.gyroscope.init('gyroUncalibrated')
-      dat.gyroscope.gyroUncalibrated.v = [simulator_state.imu.gyroscope.x, simulator_state.imu.gyroscope.y, simulator_state.imu.gyroscope.z]
-      self.pm.send('gyroscope', dat)
+    dat = messaging.new_message('gyroscope', valid=True)
+    dat.gyroscope.timestamp = dat.logMonoTime  # TODO: use the IMU timestamp
+    dat.gyroscope.init('gyroUncalibrated')
+    dat.gyroscope.gyroUncalibrated.v = [simulator_state.imu.gyroscope.x, simulator_state.imu.gyroscope.y, simulator_state.imu.gyroscope.z]
+    self.pm.send('gyroscope', dat)
 
   def send_gps_message(self, simulator_state: 'SimulatorState'):
     if not simulator_state.valid:

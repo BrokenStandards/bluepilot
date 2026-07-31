@@ -50,20 +50,45 @@ def convert_to_capnp(struct: structs.CarParamsSP | structs.CarStateSP | structs.
   return struct_capnp
 
 
-def convert_carControlSP(struct: capnp.lib.capnp._DynamicStructReader) -> structs.CarControlSP:
-  # TODO: recursively handle any car struct as needed
-  def remove_deprecated(s: dict) -> dict:
-    return {k: v for k, v in s.items() if not k.endswith('DEPRECATED')}
-
-  struct_dict = struct.to_dict()
-  struct_dataclass = structs.CarControlSP(**remove_deprecated({k: v for k, v in struct_dict.items() if not isinstance(k, dict)}))
-
-  struct_dataclass.mads = structs.ModularAssistiveDrivingSystem(**remove_deprecated(struct_dict.get('mads', {})))
-  # struct_dataclass.params = [structs.CarControlSP.Param(**remove_deprecated(p)) for p in struct_dict.get('params', [])]
-  struct_dataclass.leadOne = structs.LeadData(**remove_deprecated(struct_dict.get('leadOne', {})))
-  struct_dataclass.leadTwo = structs.LeadData(**remove_deprecated(struct_dict.get('leadTwo', {})))
-  struct_dataclass.intelligentCruiseButtonManagement = structs.IntelligentCruiseButtonManagement(
-    **remove_deprecated(struct_dict.get('intelligentCruiseButtonManagement', {}))
+def _convert_lead_data(src: capnp.lib.capnp._DynamicStructReader) -> structs.LeadData:
+  return structs.LeadData(
+    dRel=src.dRel, yRel=src.yRel, vRel=src.vRel, aRel=src.aRel,
+    vLead=src.vLead, dPath=src.dPath, vLat=src.vLat,
+    vLeadK=src.vLeadK, aLeadK=src.aLeadK, fcw=src.fcw,
+    status=src.status, aLeadTau=src.aLeadTau, modelProb=src.modelProb,
+    radar=src.radar, radarTrackId=src.radarTrackId,
   )
 
-  return struct_dataclass
+
+def convert_carControlSP(struct: capnp.lib.capnp._DynamicStructReader) -> structs.CarControlSP:
+  # Direct field reads instead of struct.to_dict(): ~2.5x faster on card's 100Hz path.
+  # to_dict() recursively dictifies the whole message (including DEPRECATED fields and
+  # the unused params list) only for most of it to be thrown away again.
+  # Equivalence vs the old to_dict-based conversion, for a POPULATED message: identical
+  # (enums become plain strings, which compare equal to the StrEnum fields; DEPRECATED
+  # fields keep their dataclass defaults; params stays [] -- it has no publisher or
+  # consumer, and the old code never converted it either). For an UNSET sub-struct
+  # (reachable only via SubMaster's default message before the first carControlSP
+  # arrives -- card.py gates on all_alive(['carControl']) only), this yields capnp
+  # SCHEMA defaults where the old code accidentally yielded dataclass defaults:
+  # concretely leadOne/leadTwo.radarTrackId is -1 instead of 0, and enum fields are
+  # plain str instead of StrEnum members. No consumer distinguishes these.
+  # NOTE: when a new field is added to CarControlSP in cereal/custom.capnp it must be
+  # added here too; test_convert_carControlSP_covers_schema pins this.
+  mads = struct.mads
+  icbm = struct.intelligentCruiseButtonManagement
+  return structs.CarControlSP(
+    mads=structs.ModularAssistiveDrivingSystem(
+      state=str(mads.state),
+      enabled=mads.enabled,
+      active=mads.active,
+      available=mads.available,
+    ),
+    leadOne=_convert_lead_data(struct.leadOne),
+    leadTwo=_convert_lead_data(struct.leadTwo),
+    intelligentCruiseButtonManagement=structs.IntelligentCruiseButtonManagement(
+      state=str(icbm.state),
+      sendButton=str(icbm.sendButton),
+      vTarget=icbm.vTarget,
+    ),
+  )

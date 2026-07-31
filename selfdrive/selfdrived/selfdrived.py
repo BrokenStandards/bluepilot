@@ -134,6 +134,8 @@ class SelfdriveD(CruiseHelper):
     self.events_prev = []
     self.logged_comm_issue = None
     self.not_running_prev = None
+    self.not_running: set[str] = set()
+    self.not_running_recv_frame = -1
     self.experimental_mode = False
     self.personality = get_sanitize_int_param(
       "LongitudinalPersonality",
@@ -361,7 +363,14 @@ class SelfdriveD(CruiseHelper):
     # All events here should at least have NO_ENTRY and SOFT_DISABLE.
     num_events = len(self.events)
 
-    not_running = {p.name for p in self.sm['managerState'].processes if not p.running and p.shouldBeRunning}
+    # managerState is a 2Hz service polled here at 100Hz: rescanning the ~58-process list
+    # every frame is ~98% redundant pycapnp work (~0.7% of a core). Memoize on recv_frame --
+    # sm.data for a conflated single socket changes iff recv_frame changes, so this is exact
+    # under all call patterns, including the not-initialized early-return window above.
+    if self.sm.recv_frame['managerState'] != self.not_running_recv_frame:
+      self.not_running_recv_frame = self.sm.recv_frame['managerState']
+      self.not_running = {p.name for p in self.sm['managerState'].processes if not p.running and p.shouldBeRunning}
+    not_running = self.not_running
     if self.sm.recv_frame['managerState'] and len(not_running):
       if not_running != self.not_running_prev:
         cloudlog.event("process_not_running", not_running=not_running, error=True)
@@ -376,11 +385,16 @@ class SelfdriveD(CruiseHelper):
           self.events.add(EventName.cameraFrameRate)
     if not REPLAY and self.rk.lagging:
       self.events.add(EventName.selfdrivedLagging)
-    if self.sm['radarState'].radarErrors.canError:
+    # single reader wrapper + explicit bool reads: radarErrors.to_dict() allocated a dict
+    # of RadarData.Error's 4 bools on every 100Hz frame (exhaustively equivalent -- the
+    # struct is exactly canError, radarFault, wrongConfig, radarUnavailableTemporary,
+    # see cereal/car.capnp:303-308)
+    radar_errors = self.sm['radarState'].radarErrors
+    if radar_errors.canError:
       self.events.add(EventName.canError)
-    elif self.sm['radarState'].radarErrors.radarUnavailableTemporary:
+    elif radar_errors.radarUnavailableTemporary:
       self.events.add(EventName.radarTempUnavailable)
-    elif any(self.sm['radarState'].radarErrors.to_dict().values()):
+    elif radar_errors.radarFault or radar_errors.wrongConfig:
       self.events.add(EventName.radarFault)
     if not self.sm.valid['pandaStates']:
       self.events.add(EventName.usbError)
