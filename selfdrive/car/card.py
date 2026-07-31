@@ -28,7 +28,7 @@ from openpilot.common.bluepilot import is_bluepilot
 if is_bluepilot():
   from openpilot.bluepilot.selfdrive.car.bp_card_publisher import (publish_controller_state_bp, publish_car_state_bp,
                                                                    publish_hev_availability)
-  from openpilot.bluepilot.selfdrive.car.bp_ford_settings import read_ford_settings
+  from openpilot.bluepilot.selfdrive.car.bp_ford_settings import FordSettingsReader
 
 REPLAY = "REPLAY" in os.environ
 
@@ -190,12 +190,14 @@ class Car:
     self.experimental_mode = self.params.get_bool("ExperimentalMode")
 
     # BluePilot: Ford settings snapshot for the car layer. Read here so the very first
-    # control frame already has the user's settings, then refreshed on params_thread.
-    # Replaced wholesale (never mutated in place) so the control thread always reads a
-    # consistent struct.
+    # control frame already has the user's settings, then refreshed event-driven on
+    # params_thread. Replaced wholesale (never mutated in place) so the control thread
+    # always reads a consistent struct.
+    self.ford_settings_reader = None
     self.ford_settings_bp = None
     if is_bluepilot():
-      self.ford_settings_bp = read_ford_settings(self.params)
+      self.ford_settings_reader = FordSettingsReader(self.params)
+      self.ford_settings_bp = self.ford_settings_reader.settings
       publish_hev_availability(self.CP, self.params)
 
     # card is driven by can recv, expected at 100Hz
@@ -336,10 +338,11 @@ class Car:
       self.dynamic_experimental_control = self.params.get_bool("DynamicExperimentalControl")
       self.v_cruise_helper.read_custom_set_speed_params()
 
-      # BluePilot: refresh the Ford settings snapshot for the car layer (opendbc must not
-      # read Params itself -- see bluepilot/selfdrive/car/bp_ford_settings.py)
-      if is_bluepilot():
-        self.ford_settings_bp = read_ford_settings(self.params)
+      # BluePilot: refresh the Ford settings snapshot for the car layer, but only when the
+      # params store actually changed -- steady state is one stat() and zero reads.
+      # (opendbc must not read Params itself -- see bluepilot/selfdrive/car/bp_ford_settings.py)
+      if is_bluepilot() and self.ford_settings_reader.update():
+        self.ford_settings_bp = self.ford_settings_reader.settings
 
       time.sleep(0.1)
 

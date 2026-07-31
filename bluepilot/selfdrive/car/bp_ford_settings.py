@@ -8,15 +8,21 @@ how MADS and ICBM do it. Ford was the only brand importing openpilot Params and 
 them directly inside the 100Hz CarController.update(), which put ~1500 file reads/s into
 a Priority.CTRL_HIGH realtime process.
 
-This module does the reading in openpilot land, on card.py's existing 10Hz params thread,
-and card.py hands the result to the car layer as structs.FordSettingsBP. Every key stays
-runtime-tunable exactly as before; only the read cadence changes (100Hz -> 10Hz), so a
-settings change now applies within ~100ms instead of ~10ms. No driver-visible behavior
-depends on that difference, and it keeps the onroad lateral-mode tap target responsive.
+This module does the reading in openpilot land and card.py hands the result to the car
+layer as structs.FordSettingsBP.
+
+The reads are event-driven (see FordSettingsReader): in steady state we do one stat() per
+poll and zero file reads, refreshing only when the params store actually changes. Settings
+cannot normally be edited while moving anyway -- the UI forces the ONROAD layout on
+transition (selfdrive/ui/layouts/main.py:_handle_onroad_transition), closing the settings
+panel -- but the two writers that CAN fire mid-drive are still caught automatically:
+the MICI onroad lateral-mode overlay tap, and sunnylink pushing settings over the network.
 
 Values are validated/clamped here, at the boundary, so the car layer can trust the struct
 and an out-of-band param write can never reach the control path with a bad value.
 """
+
+import os
 
 from opendbc.car import structs
 from openpilot.common.params import Params
@@ -89,3 +95,48 @@ def read_ford_settings(params: Params) -> structs.FordSettingsBP:
   s.coastingMode = _get_int(params, "FordPrefCoastingMode", 0, 0, 1)
 
   return s
+
+
+class FordSettingsReader:
+  """Event-driven Ford settings snapshot.
+
+  openpilot params are files, and Params.put() renames the new value into the params
+  directory (common/params.cc: mkstemp -> write -> fsync -> rename -> fsync_dir). A rename
+  into a directory bumps that directory's mtime, for a brand-new key and for an overwrite
+  of an existing one alike, while plain reads leave it untouched. So watching a single
+  mtime detects ANY param write, from any writer, with no cooperation required from the
+  writers themselves -- the TICI settings menu, the MICI settings menu, the MICI onroad
+  lateral-mode overlay tap, and sunnylink all get picked up automatically. Nothing can be
+  silently missed by forgetting to signal a change.
+
+  Steady state costs one stat() per poll and zero file reads. If the stat is unavailable
+  the reader degrades to re-reading every poll, which is exactly the previous behavior, so
+  this can only ever do less I/O than before -- never more.
+  """
+
+  def __init__(self, params: Params):
+    self._params = params
+    try:
+      # getParamPath("") -> the directory the key files live in (common/params.h:54)
+      self._params_dir: str | None = params.get_param_path("")
+    except Exception:
+      self._params_dir = None
+    self.settings = read_ford_settings(params)
+    self._mtime = self._read_mtime()
+
+  def _read_mtime(self) -> int | None:
+    if self._params_dir is None:
+      return None
+    try:
+      return os.stat(self._params_dir).st_mtime_ns
+    except OSError:
+      return None
+
+  def update(self) -> bool:
+    """Refresh the snapshot only if the params store changed. True if it was re-read."""
+    mtime = self._read_mtime()
+    if mtime is not None and mtime == self._mtime:
+      return False
+    self._mtime = mtime
+    self.settings = read_ford_settings(self._params)
+    return True
