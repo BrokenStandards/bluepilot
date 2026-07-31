@@ -10,7 +10,7 @@ from functools import wraps
 import cereal.messaging as messaging
 from openpilot.common.params import Params
 from openpilot.system.manager.process_config import managed_processes
-from openpilot.system.version import training_version, terms_version
+from openpilot.system.version import training_version, terms_version, terms_version_sp
 
 
 def set_params_enabled():
@@ -19,6 +19,10 @@ def set_params_enabled():
 
   params = Params()
   params.put("HasAcceptedTerms", terms_version, block=True)
+  # sunnypilot: hardwared gates startup on BOTH terms versions (system/hardware/hardwared.py:292);
+  # without this every consumer of this helper (the sim included) sits offroad forever with
+  # "accepted_terms_sp": false in the Startup blocked log line.
+  params.put("HasAcceptedTermsSP", terms_version_sp, block=True)
   params.put("CompletedTrainingVersion", training_version, block=True)
   params.put_bool("OpenpilotEnabledToggle", True, block=True)
 
