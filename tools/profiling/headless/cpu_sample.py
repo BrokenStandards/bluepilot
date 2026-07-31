@@ -32,7 +32,7 @@ def stack_pids():
         cmd = f.read().decode(errors="replace").replace("\x00", " ").strip()
     except OSError:
       continue
-    if any(m in cmd for m in MARKERS) and "cpu_sample" not in cmd:
+    if any(m in cmd for m in MARKERS) and "cpu_sample" not in cmd and "claude" not in cmd:
       # label: the python module if present, else the binary
       label = cmd
       for tok in cmd.split():

@@ -28,6 +28,25 @@ if [ -z "$DISPLAY" ]; then
   source selfdrive/test/setup_xvfb.sh
 fi
 
+# Container-specific process blocks, appended to the sim launcher's own BLOCK list:
+#  - soundd: crash-loops on OSError PortAudio library not found (no audio device here);
+#    the restart churn pollutes the CPU numbers
+#  - models_manager: mid-run it can activate a model bundle and flip
+#    ModelRunnerTypeCache to tinygrad, which stops the stock modeld under us
+export BLOCK="${BLOCK},soundd,models_manager"
+
+# A stale ModelRunnerTypeCache (e.g. tinygrad, cached by a previous models_manager run
+# with no bundle actually active) stops stock modeld and leaves NO model running --
+# the stack then never becomes engageable and the bridge's auto-engage never fires.
+# Pin the stock runner for the profile.
+python3 - <<'PY'
+from openpilot.common.params import Params
+p = Params()
+p.remove("ModelRunnerTypeCache")
+p.remove("ModelManager_ActiveBundle")
+print("model runner cache cleared")
+PY
+
 cleanup() {
   echo "== teardown"
   [ -n "$BRIDGE_PID" ] && kill "$BRIDGE_PID" 2>/dev/null || true

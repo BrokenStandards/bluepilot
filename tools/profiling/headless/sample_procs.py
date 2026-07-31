@@ -18,19 +18,22 @@ MARKERS = ("selfdrive.", "system.", "sunnypilot.", "bluepilot.")
 
 
 def python_stack_procs():
+  # NB: manager children setproctitle() themselves, so argv[0] is e.g.
+  # "selfdrive.car.card", NOT "python". Detect the interpreter via /proc/pid/exe.
   procs = {}
   for pid in os.listdir("/proc"):
     if not pid.isdigit():
       continue
     try:
+      exe = os.readlink(f"/proc/{pid}/exe")
       with open(f"/proc/{pid}/cmdline", "rb") as f:
         argv = f.read().decode(errors="replace").split("\x00")
     except OSError:
       continue
-    if not argv or "python" not in os.path.basename(argv[0]):
+    if "python" not in os.path.basename(exe):
       continue
     mod = next((a for a in argv if any(m in a for m in MARKERS)), None)
-    if mod:
+    if mod and "claude" not in " ".join(argv):
       procs[int(pid)] = mod.replace("/", ".").removesuffix(".py")
   return procs
 
