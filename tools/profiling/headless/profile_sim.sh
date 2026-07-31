@@ -50,22 +50,27 @@ p.remove("ModelManager_ActiveBundle")
 print("model runner cache cleared")
 PY
 
+# Teardown must kill the whole process GROUPS: manager children setproctitle()
+# themselves (argv[0] becomes e.g. "selfdrive.car.card"), so name-based pkill
+# misses them, the leaked stack keeps running, and the next profile run gets two
+# stacks fighting over msgq -- which both corrupts the numbers and blocks
+# engagement. setsid gives each launch its own group; kill -- -PGID sweeps it.
 cleanup() {
   echo "== teardown"
-  [ -n "$BRIDGE_PID" ] && kill "$BRIDGE_PID" 2>/dev/null || true
-  [ -n "$MANAGER_PID" ] && kill "$MANAGER_PID" 2>/dev/null || true
+  [ -n "$BRIDGE_PID" ] && kill -- -"$BRIDGE_PID" 2>/dev/null || true
+  [ -n "$MANAGER_PID" ] && kill -- -"$MANAGER_PID" 2>/dev/null || true
   sleep 3
-  pkill -f 'system.manager' 2>/dev/null || true
-  pkill -f 'run_bridge' 2>/dev/null || true
+  [ -n "$BRIDGE_PID" ] && kill -9 -- -"$BRIDGE_PID" 2>/dev/null || true
+  [ -n "$MANAGER_PID" ] && kill -9 -- -"$MANAGER_PID" 2>/dev/null || true
 }
 trap cleanup EXIT
 
 echo "== launching stack (manager)"
-./tools/sim/launch_openpilot.sh > "$OUT/manager.log" 2>&1 &
+setsid ./tools/sim/launch_openpilot.sh > "$OUT/manager.log" 2>&1 &
 MANAGER_PID=$!
 
 echo "== launching MetaDrive bridge"
-./tools/sim/run_bridge.py > "$OUT/bridge.log" 2>&1 &
+setsid ./tools/sim/run_bridge.py > "$OUT/bridge.log" 2>&1 &
 BRIDGE_PID=$!
 
 echo "== warmup ${WARMUP}s (MetaDrive spawn + ignition + engage)"
@@ -76,6 +81,9 @@ if ! kill -0 "$BRIDGE_PID" 2>/dev/null; then
   tail -20 "$OUT/bridge.log" >&2
   exit 1
 fi
+
+echo "== engagement state"
+python3 "$DIR/check_engaged.py" 2>&1 | tee "$OUT/engaged.txt" || true
 
 echo "== sampling ${SAMPLE}s: per-process CPU + py-spy (--gil)"
 python3 "$DIR/cpu_sample.py" "$SAMPLE" --json "$OUT/cpu.json" > "$OUT/cpu.txt" &
