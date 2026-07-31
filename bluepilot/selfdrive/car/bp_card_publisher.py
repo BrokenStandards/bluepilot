@@ -135,11 +135,11 @@ def publish_controller_state_bp(CI, pm):
 
     # BluePilot: per-frame longitudinal coasting diagnostics (set by LongitudinalExt.update
     # at 50Hz; getattr defaults keep non-Ford / pre-first-update frames safe).
-    cs_bp.longCoastingMode = int(getattr(CI.CC, "longCoastingMode", 0))
+    cs_bp.longCoastingMode = max(0, min(255, int(getattr(CI.CC, "longCoastingMode", 0))))
     cs_bp.longBpLongUsed = bool(getattr(CI.CC, "longBpLongUsed", False))
     cs_bp.longBrakeActuate = bool(getattr(CI.CC, "longBrakeActuate", False))
     cs_bp.longPrechargeActuate = bool(getattr(CI.CC, "longPrechargeActuate", False))
-    cs_bp.longLeadState = int(getattr(CI.CC, "longLeadState", 0))
+    cs_bp.longLeadState = max(0, min(255, int(getattr(CI.CC, "longLeadState", 0))))
     cs_bp.longOpAccel = float(getattr(CI.CC, "longOpAccel", 0.0))
     cs_bp.longBpAccel = float(getattr(CI.CC, "longBpAccel", 0.0))
     cs_bp.longOpGas = float(getattr(CI.CC, "longOpGas", 0.0))

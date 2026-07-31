@@ -129,7 +129,10 @@ class LongitudinalExt:
     """Read longitudinal-related Params from the UI. Called each frame."""
     self.disable_BP_long_UI = params.get_bool("disable_BP_long_UI")
     self.disable_downhill_comp_UI = params.get_bool("disable_downhill_comp_UI")
-    self.coasting_mode = int(params.get("FordPrefCoastingMode", return_default=True) or COASTING_MODE_LEGACY)
+    # Any unrecognized stored value falls back to legacy (also keeps the UInt8
+    # diagnostic in range for controllerStateBP)
+    mode = int(params.get("FordPrefCoastingMode", return_default=True) or COASTING_MODE_LEGACY)
+    self.coasting_mode = COASTING_MODE_EXTENDED if mode == COASTING_MODE_EXTENDED else COASTING_MODE_LEGACY
 
   def update(self, CC, CS, op_accel, op_gas, accel_due_to_pitch, v_ego_mph, stopping, target_speed):
     """
@@ -264,9 +267,12 @@ class LongitudinalExt:
         # Rate limit downward accel changes while following (dampen initial
         # brake hit). Cruise decel is already shaped by the planner, so with
         # no lead the request passes through and the ROC seed stays fresh.
+        # The floor starts at min(last, 0) so a positive seed (accelerating
+        # behind a departing lead that then brakes) drops to 0 immediately and
+        # only the below-zero decel onset is smoothed -- never a positive pin.
         # Skip rate limit if imminent collision risk.
         if lead is not None and ttc_sec > 8.0 and lead_time_sec > 0.5:
-          bp_accel = clip(bp_accel, self.bp_accel_last - self.ext_following_accel_ROC, 999)
+          bp_accel = clip(bp_accel, min(self.bp_accel_last, 0.0) - self.ext_following_accel_ROC, 999)
       else:
         # LEGACY: original gas/accel limits per state, byte-for-byte
         max_follow_gas = op_gas
@@ -358,16 +364,27 @@ class LongitudinalExt:
       # checks the bits and the accel value independently (ford.h), so this is a
       # tuning change only.
       accel_comp = accel + accel_due_to_pitch
+      # The propulsion channel cannot carry requests below MIN_GAS; carcontroller
+      # forces gas INACTIVE on the *raw* request (pitch-blind), so on uphill pitch
+      # the friction brakes must take over even while accel_comp is still above
+      # brake_target -- otherwise raw requests in (-brake_target - pitch, MIN_GAS)
+      # would actuate nothing at all. The floor check precedes the release check so
+      # a steady sub-MIN_GAS request on a grade cannot be released every frame.
+      prpl_floor_hit = CC.longActive and gas == CarControllerParams.INACTIVE_GAS
       ext_brake_actuate = self.ext_brake_actuate_last
-      if accel_comp > brake_release or not CC.longActive:
+      if not CC.longActive:
         ext_brake_actuate = False
-      elif accel_comp < brake_target:
+      elif prpl_floor_hit or accel_comp < brake_target:
         ext_brake_actuate = True
+      elif accel_comp > brake_release:
+        ext_brake_actuate = False
       ext_precharge_actuate = self.ext_precharge_actuate_last
-      if accel_comp > precharge_release or not CC.longActive:
+      if not CC.longActive:
         ext_precharge_actuate = False
-      elif accel_comp < precharge_target:
+      elif prpl_floor_hit or accel_comp < precharge_target:
         ext_precharge_actuate = True
+      elif accel_comp > precharge_release:
+        ext_precharge_actuate = False
       # Coming to (and holding) a stop needs friction brakes regardless of how
       # shallow the request still is -- engine braking cannot hold the car.
       if stopping and CC.longActive:
