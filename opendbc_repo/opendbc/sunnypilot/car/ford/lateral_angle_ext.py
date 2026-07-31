@@ -172,8 +172,13 @@ class LateralAngleExt:
     self.angle_stall_blip_active = False
     self.press_timer_s = 0.0          # continuous steeringPressed time, for the hand-off blip
 
-  def update_angle_params(self, params):
-    """Sets per-platform gain defaults and reads user feel-factor params."""
+  def update_angle_params(self, bp):
+    """Sets per-platform gain defaults and applies the user feel-factor settings.
+
+    `bp` is a structs.FordSettingsBP carried on carControlSP, refreshed by card.py's 10Hz
+    params thread (bluepilot/selfdrive/car/bp_ford_settings.py), which already clamps the
+    feel factors to the same ranges the UI sliders enforce.
+    """
     self._ensure_lateral_curv_initialized(self.CP)
     fp = getattr(self.CP, 'carFingerprint', '')
     if fp in _CANFD_BOF_CARS:
@@ -184,23 +189,10 @@ class LateralAngleExt:
       low, high = _GAIN_CAN
     self.path_angle_gain_lowC_highV = low
     self.path_angle_gain_highC_highV = high
-    if params is not None and hasattr(params, "get"):
-      for attr, key in (("low_speed_curv_factor", "FordLowSpeedFactor_ang"),
-                        ("high_speed_curv_factor", "FordHighSpeedFactor_ang")):
-        try:
-          raw = params.get(key, return_default=True)
-          if raw is not None and raw != b"":
-            setattr(self, attr, float(clip(
-              float(raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else raw), 0.5, 1.5)))
-        except Exception:
-          pass
-      try:
-        raw = params.get("lane_change_factor_high_ang", return_default=True)
-        if raw is not None and raw != b"":
-          self.lane_change_factor_high_ang = float(clip(
-            float(raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else raw), 0.85, 1.50))
-      except Exception:
-        pass
+    if bp is not None:
+      self.low_speed_curv_factor = float(clip(bp.lowSpeedFactorAng, 0.5, 1.5))
+      self.high_speed_curv_factor = float(clip(bp.highSpeedFactorAng, 0.5, 1.5))
+      self.lane_change_factor_high_ang = float(clip(bp.laneChangeFactorHighAng, 0.85, 1.50))
 
   def update_angle_strategy(self, CC, CS, actuators, CP):
     """

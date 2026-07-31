@@ -220,19 +220,25 @@ class LateralCurvExt:
     self.path_angle_last = 0.0
     self.curvature_rate = 0
 
-  def update_lateral_params(self, params):
-    """Read lateral-related Params from the UI. Called each frame."""
-    self.enable_human_turn_detection_curv = params.get_bool("enable_human_turn_detection_curv")
-    self.lane_change_factor_high_curv = float(params.get("lane_change_factor_high_curv", return_default=True))
-    self.pc_blend_ratio_high_C_UI_curv = float(params.get("pc_blend_ratio_high_C_UI_curv", return_default=True))
-    self.pc_blend_ratio_low_C_UI_curv = float(params.get("pc_blend_ratio_low_C_UI_curv", return_default=True))
-    self.enable_lane_positioning_curv = params.get_bool("enable_lane_positioning_curv")
-    self.custom_path_offset_curv = float(params.get("custom_path_offset_curv", return_default=True))
-    self.enable_lane_full_mode_curv = params.get_bool("enable_lane_full_mode_curv")
-    self.custom_profile_curv = int(params.get("custom_profile_curv", return_default=True))
-    self.LC_PID_gain_UI_curv = float(params.get("LC_PID_gain_UI_curv", return_default=True))
+  def update_lateral_params(self, bp):
+    """Apply the BluePilot lateral settings snapshot.
 
-    self.primary_lateral_control = PrimaryLateralControl(params.get("FordPrefLateralControl", return_default=True) or 0)
+    `bp` is a structs.FordSettingsBP carried on carControlSP, refreshed by card.py's 10Hz
+    params thread (bluepilot/selfdrive/car/bp_ford_settings.py). opendbc does not read
+    Params -- see the module docstring there for why. Values are already validated and
+    clamped at that boundary.
+    """
+    self.enable_human_turn_detection_curv = bp.enableHumanTurnDetectionCurv
+    self.lane_change_factor_high_curv = bp.laneChangeFactorHighCurv
+    self.pc_blend_ratio_high_C_UI_curv = bp.pcBlendRatioHighCurv
+    self.pc_blend_ratio_low_C_UI_curv = bp.pcBlendRatioLowCurv
+    self.enable_lane_positioning_curv = bp.enableLanePositioningCurv
+    self.custom_path_offset_curv = bp.customPathOffsetCurv
+    self.enable_lane_full_mode_curv = bp.enableLaneFullModeCurv
+    self.custom_profile_curv = bp.customProfileCurv
+    self.LC_PID_gain_UI_curv = bp.lcPidGainCurv
+
+    self.primary_lateral_control = PrimaryLateralControl(bp.primaryLateralControl)
 
   def _ensure_lateral_curv_initialized(self, CP):
     # Compatibility shim for LateralAngleExt, which calls this as a lazy-init guard. In this

@@ -148,6 +148,11 @@ class CarControlSP:
   leadOne: 'LeadData' = field(default_factory=lambda: LeadData())
   leadTwo: 'LeadData' = field(default_factory=lambda: LeadData())
   intelligentCruiseButtonManagement: 'IntelligentCruiseButtonManagement' = field(default_factory=lambda: IntelligentCruiseButtonManagement())
+  # BluePilot: Ford settings snapshot, attached by card.py (see FordSettingsBP below).
+  # Not part of the carControlSP capnp schema -- it never crosses a socket, so the wire
+  # format stays identical to upstream. convert_carControlSP() leaves it at its default
+  # and card.py overwrites it before CI.apply().
+  fordSettingsBP: 'FordSettingsBP' = field(default_factory=lambda: FordSettingsBP())
 
   @auto_dataclass
   class Param:
@@ -170,6 +175,44 @@ class CarControlSP:
 @auto_dataclass
 class CarStateSP:
   speedLimit: float = auto_field()
+
+
+# BluePilot: Ford runtime settings snapshot.
+#
+# opendbc is meant to be openpilot-independent: every other brand takes its settings
+# through CarParamsSP at car init (opendbc/sunnypilot/car/interfaces.py), and settings
+# that must stay live reach the car layer as derived state on carControlSP (see how MADS
+# and ICBM do it). Ford was the only brand reading openpilot Params directly inside the
+# 100Hz CarController.update(), which put ~1500 file reads/s in a realtime process.
+#
+# These are read on card.py's 10Hz params thread (bluepilot/selfdrive/car/bp_ford_settings.py)
+# and handed to the car layer as this struct, so the control tick does no file I/O.
+# Defaults MUST match common/params_keys.h so an unpopulated snapshot behaves like a
+# fresh install.
+@auto_dataclass
+class FordSettingsBP:
+  # --- Lateral: curvature mode ---
+  enableHumanTurnDetectionCurv: bool = True   # enable_human_turn_detection_curv
+  laneChangeFactorHighCurv: float = 0.85      # lane_change_factor_high_curv
+  pcBlendRatioHighCurv: float = 0.4           # pc_blend_ratio_high_C_UI_curv
+  pcBlendRatioLowCurv: float = 0.4            # pc_blend_ratio_low_C_UI_curv
+  enableLanePositioningCurv: bool = False     # enable_lane_positioning_curv
+  customPathOffsetCurv: float = 0.0           # custom_path_offset_curv
+  enableLaneFullModeCurv: bool = False        # enable_lane_full_mode_curv
+  customProfileCurv: int = 0                  # custom_profile_curv
+  lcPidGainCurv: float = 3.0                  # LC_PID_gain_UI_curv
+  # --- Lateral: strategy select + angle mode ---
+  primaryLateralControl: int = 0              # FordPrefLateralControl: 0=curvature, 1=angle
+  lowSpeedFactorAng: float = 1.0              # FordLowSpeedFactor_ang
+  highSpeedFactorAng: float = 1.0             # FordHighSpeedFactor_ang
+  laneChangeFactorHighAng: float = 1.0        # lane_change_factor_high_ang
+  disableBpLat: bool = False                  # disable_BP_lat_UI
+  # --- HUD ---
+  sendHandsFreeClusterMsg: bool = False       # send_hands_free_cluster_msg
+  # --- Longitudinal ---
+  disableBpLong: bool = False                 # disable_BP_long_UI
+  disableDownhillComp: bool = False           # disable_downhill_comp_UI
+  coastingMode: int = 0                       # FordPrefCoastingMode: 0=legacy, 1=extended
 
 
 # BluePilot: ControllerStateBP for lateral uncertainty (angleState vehicles)

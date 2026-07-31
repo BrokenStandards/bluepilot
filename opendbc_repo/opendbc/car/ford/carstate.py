@@ -1,7 +1,6 @@
 from opendbc.can import CANDefine, CANParser
 from opendbc.car import Bus, create_button_events, structs
 from opendbc.car.common.conversions import Conversions as CV
-from openpilot.common.params import Params
 from opendbc.car.ford.fordcan import CanBus
 from opendbc.car.ford.values import DBC, CarControllerParams, FordFlags
 from opendbc.car.interfaces import CarStateBase
@@ -19,7 +18,6 @@ class CarState(CarStateBase, MadsCarState, CarStateExt):
     MadsCarState.__init__(self, CP, CP_SP)
     CarStateExt.__init__(self, CP, CP_SP)
     can_define = CANDefine(DBC[CP.carFingerprint][Bus.pt])
-    self.params = Params()
 
     if CP.transmissionType == TransmissionType.automatic:
       if CP.flags & FordFlags.CANFD:
@@ -36,9 +34,9 @@ class CarState(CarStateBase, MadsCarState, CarStateExt):
     # BluePilot: fix uninitialized attribute (used by ALT_STEER_ANGLE steering angle calc)
     self.steering_angle_offset_deg = 0.0
 
-    # BluePilot: Save HEV data available flags to params for UI
-    self.params.put_bool("FordPrefHevDataAvailable", True if CP.flags & FordFlags.HEV_CLUSTER_DATA else False)
-    self.params.put_bool("FordPrefHevBattDataAvailable", True if CP.flags & FordFlags.HEV_BATTERY_DATA else False)
+    # BluePilot: the HEV-capability flags the UI reads (FordPrefHevDataAvailable /
+    # FordPrefHevBattDataAvailable) are pure functions of CP.flags and are now written
+    # once from card.py -- opendbc does not touch openpilot Params.
 
   def update(self, can_parsers) -> tuple[structs.CarState, structs.CarStateSP]:
     cp = can_parsers[Bus.pt]

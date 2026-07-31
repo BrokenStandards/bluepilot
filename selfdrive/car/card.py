@@ -26,7 +26,9 @@ from openpilot.sunnypilot.selfdrive.car import interfaces as sunnypilot_interfac
 # BluePilot: conditional BP message publishing (controllerStateBP, carStateBP)
 from openpilot.common.bluepilot import is_bluepilot
 if is_bluepilot():
-  from openpilot.bluepilot.selfdrive.car.bp_card_publisher import publish_controller_state_bp, publish_car_state_bp
+  from openpilot.bluepilot.selfdrive.car.bp_card_publisher import (publish_controller_state_bp, publish_car_state_bp,
+                                                                   publish_hev_availability)
+  from openpilot.bluepilot.selfdrive.car.bp_ford_settings import read_ford_settings
 
 REPLAY = "REPLAY" in os.environ
 
@@ -187,6 +189,15 @@ class Car:
     self.is_metric = self.params.get_bool("IsMetric")
     self.experimental_mode = self.params.get_bool("ExperimentalMode")
 
+    # BluePilot: Ford settings snapshot for the car layer. Read here so the very first
+    # control frame already has the user's settings, then refreshed on params_thread.
+    # Replaced wholesale (never mutated in place) so the control thread always reads a
+    # consistent struct.
+    self.ford_settings_bp = None
+    if is_bluepilot():
+      self.ford_settings_bp = read_ford_settings(self.params)
+      publish_hev_availability(self.CP, self.params)
+
     # card is driven by can recv, expected at 100Hz
     self.rk = Ratekeeper(100, print_delay_threshold=None)
 
@@ -288,7 +299,11 @@ class Car:
     if self.sm.all_alive(['carControl']):
       # send car controls over can
       now_nanos = self.can_log_mono_time if REPLAY else int(time.monotonic() * 1e9)
-      self.last_actuators_output, can_sends = self.CI.apply(CC, convert_carControlSP(CC_SP), now_nanos)
+      CC_SP_dc = convert_carControlSP(CC_SP)
+      # BluePilot: attach the settings snapshot so the car layer never touches Params
+      if is_bluepilot():
+        CC_SP_dc.fordSettingsBP = self.ford_settings_bp
+      self.last_actuators_output, can_sends = self.CI.apply(CC, CC_SP_dc, now_nanos)
       self.pm.send('sendcan', can_list_to_can_capnp(can_sends, msgtype='sendcan', valid=CS.canValid))
 
       self.CC_prev = CC
@@ -320,6 +335,11 @@ class Car:
       # sunnypilot
       self.dynamic_experimental_control = self.params.get_bool("DynamicExperimentalControl")
       self.v_cruise_helper.read_custom_set_speed_params()
+
+      # BluePilot: refresh the Ford settings snapshot for the car layer (opendbc must not
+      # read Params itself -- see bluepilot/selfdrive/car/bp_ford_settings.py)
+      if is_bluepilot():
+        self.ford_settings_bp = read_ford_settings(self.params)
 
       time.sleep(0.1)
 

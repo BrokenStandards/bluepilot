@@ -134,9 +134,9 @@ class HudExt:
     self.main_on_last = False
     self.lkas_enabled_last = False
 
-  def update_hud_params(self, params, CP):
-    """Read HUD-related Params from the UI. Called each frame."""
-    self.send_hands_free_cluster_msg = params.get_bool("send_hands_free_cluster_msg")
+  def update_hud_params(self, bp, CP):
+    """Apply the BluePilot HUD settings snapshot (carControlSP, refreshed by card.py)."""
+    self.send_hands_free_cluster_msg = bp.sendHandsFreeClusterMsg
     # Block hands-free UI on CAN vehicles — only CAN FD supports the cluster message
     if not (CP.flags & FordFlags.CANFD):
       self.send_hands_free_cluster_msg = False

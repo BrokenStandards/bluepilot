@@ -11,12 +11,12 @@ import unittest
 from dataclasses import dataclass
 from types import SimpleNamespace
 
+from opendbc.car import structs
 from opendbc.car.ford.values import CarControllerParams
 from opendbc.sunnypilot.car.ford.longitudinal_ext import (
   LongitudinalExt,
   COASTING_MODE_LEGACY,
   COASTING_MODE_EXTENDED,
-  PARAM_REFRESH_FRAMES,
 )
 
 INACTIVE_GAS = CarControllerParams.INACTIVE_GAS  # -5.0
@@ -422,56 +422,59 @@ class TestSafetyEnvelope(unittest.TestCase):
       self.assertEqual(res.accel_pred_send, INACTIVE_GAS)
 
 
-class _CountingParams:
-  """Counts param reads so the refresh throttle can be pinned."""
+class TestSettingsSnapshot(unittest.TestCase):
+  """Settings arrive as a structs.FordSettingsBP on carControlSP -- opendbc reads no Params."""
 
-  def __init__(self, values=None):
-    self.values = values or {}
-    self.reads = 0
-
-  def get_bool(self, key):
-    self.reads += 1
-    return bool(self.values.get(key, False))
-
-  def get(self, key, return_default=False):
-    self.reads += 1
-    return self.values.get(key, 0)
-
-
-class TestParamRefreshThrottle(unittest.TestCase):
-  """Params are files on disk; update_long_params runs at 100Hz so reads are throttled."""
-
-  def test_reads_on_first_call_then_throttles(self):
+  def test_applies_snapshot(self):
     ext = _make_ext()
-    p = _CountingParams({"FordPrefCoastingMode": 1})
-    ext.update_long_params(p)
-    # applied immediately on the first frame -- no window of stale defaults
+    bp = structs.FordSettingsBP()
+    bp.disableBpLong = True
+    bp.disableDownhillComp = True
+    bp.coastingMode = COASTING_MODE_EXTENDED
+    ext.update_long_params(bp)
+    self.assertTrue(ext.disable_BP_long_UI)
+    self.assertTrue(ext.disable_downhill_comp_UI)
     self.assertEqual(ext.coasting_mode, COASTING_MODE_EXTENDED)
-    first = p.reads
-    self.assertGreater(first, 0)
-    # the next PARAM_REFRESH_FRAMES-1 calls must not touch the disk
-    for _ in range(PARAM_REFRESH_FRAMES - 1):
-      ext.update_long_params(p)
-    self.assertEqual(p.reads, first)
-    # ...and then exactly one more refresh
-    ext.update_long_params(p)
-    self.assertEqual(p.reads, 2 * first)
 
-  def test_refreshed_value_is_picked_up(self):
+  def test_defaults_match_params_keys_defaults(self):
+    # An unpopulated snapshot must behave like a fresh install (params_keys.h defaults):
+    # BP long on, downhill comp on, legacy coasting.
     ext = _make_ext()
-    p = _CountingParams({"FordPrefCoastingMode": 0})
-    ext.update_long_params(p)
+    ext.update_long_params(structs.FordSettingsBP())
+    self.assertFalse(ext.disable_BP_long_UI)
+    self.assertFalse(ext.disable_downhill_comp_UI)
     self.assertEqual(ext.coasting_mode, COASTING_MODE_LEGACY)
-    p.values["FordPrefCoastingMode"] = 1
-    for _ in range(PARAM_REFRESH_FRAMES):
-      ext.update_long_params(p)
-    self.assertEqual(ext.coasting_mode, COASTING_MODE_EXTENDED)
 
   def test_unrecognized_mode_falls_back_to_legacy(self):
     for bad in (-1, 2, 99):
       ext = _make_ext()
-      ext.update_long_params(_CountingParams({"FordPrefCoastingMode": bad}))
+      bp = structs.FordSettingsBP()
+      bp.coastingMode = bad
+      ext.update_long_params(bp)
       self.assertEqual(ext.coasting_mode, COASTING_MODE_LEGACY)
+
+  def test_mode_change_is_picked_up_live(self):
+    # the snapshot is refreshed by card.py, so a mid-drive change still takes effect
+    ext = _make_ext()
+    bp = structs.FordSettingsBP()
+    ext.update_long_params(bp)
+    self.assertEqual(ext.coasting_mode, COASTING_MODE_LEGACY)
+    bp.coastingMode = COASTING_MODE_EXTENDED
+    ext.update_long_params(bp)
+    self.assertEqual(ext.coasting_mode, COASTING_MODE_EXTENDED)
+
+  def test_reads_no_params(self):
+    """opendbc must not import openpilot Params anywhere in the Ford car path."""
+    import pathlib
+    root = pathlib.Path(__file__).resolve().parents[4]
+    offenders = []
+    for sub in ('opendbc/car/ford', 'opendbc/sunnypilot/car/ford'):
+      for f in (root / sub).rglob('*.py'):
+        if 'tests' in f.parts:
+          continue
+        if 'from openpilot.common.params' in f.read_text():
+          offenders.append(str(f.relative_to(root)))
+    self.assertEqual(offenders, [])
 
 
 if __name__ == '__main__':

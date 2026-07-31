@@ -6,7 +6,6 @@ from opendbc.car.lateral import AVERAGE_ROAD_ROLL, ISO_LATERAL_ACCEL, apply_std_
 from opendbc.car.ford import fordcan
 from opendbc.car.ford.values import CarControllerParams, FordFlags, CAR
 from opendbc.car.interfaces import CarControllerBase, V_CRUISE_MAX
-from openpilot.common.params import Params
 
 # BluePilot: extension imports for lateral, longitudinal, and HUD control
 from opendbc.sunnypilot.car.ford.lateral_curv_ext import LateralCurvExt, PrimaryLateralControl
@@ -82,7 +81,6 @@ class CarController(CarControllerBase, LateralCurvExt, LateralAngleExt, Longitud
     # ICBM: base class sets state used at runtime, init for robustness
     # IntelligentCruiseButtonManagementInterface.__init__(self, CP, CP_SP)
 
-    self.params = Params()
     self.packer = CANPacker(dbc_names[Bus.pt])
     self.CAN = fordcan.CanBus(CP)
 
@@ -101,12 +99,16 @@ class CarController(CarControllerBase, LateralCurvExt, LateralAngleExt, Longitud
     # BluePilot: update SubMaster (modelV2, liveParameters, selfdriveState, radarState) and vehicle model
     LateralCurvExt.update_sm(self)
 
-    # BluePilot: read runtime params from UI
-    LateralCurvExt.update_lateral_params(self, self.params)
-    LateralAngleExt.update_angle_params(self, self.params)
-    self.disable_BP_lat_UI = self.params.get_bool("disable_BP_lat_UI")
-    LongitudinalExt.update_long_params(self, self.params)
-    HudExt.update_hud_params(self, self.params, self.CP)
+    # BluePilot: apply the settings snapshot card.py refreshes on its 10Hz params thread.
+    # opendbc must not read openpilot Params -- every other brand takes settings via CP_SP
+    # at init or as derived state on carControlSP (see MADS/ICBM). Details and rationale:
+    # bluepilot/selfdrive/car/bp_ford_settings.py
+    bp_settings = CC_SP.fordSettingsBP
+    LateralCurvExt.update_lateral_params(self, bp_settings)
+    LateralAngleExt.update_angle_params(self, bp_settings)
+    self.disable_BP_lat_UI = bp_settings.disableBpLat
+    LongitudinalExt.update_long_params(self, bp_settings)
+    HudExt.update_hud_params(self, bp_settings, self.CP)
 
     actuators = CC.actuators
     hud_control = CC.hudControl

@@ -120,6 +120,23 @@ def _refresh_settings_cache() -> dict:
   }
 
 
+def publish_hev_availability(CP, params: Params) -> None:
+  """BluePilot: mirror the Ford HEV capability flags into Params for the UI / web portal.
+
+  These are pure functions of CP.flags and are written once per car init. They used to be
+  written from opendbc's Ford CarState.__init__, which forced an openpilot Params import
+  into opendbc; card.py is the correct side of that boundary.
+  """
+  if getattr(CP, "brand", None) != "ford":
+    return
+  try:
+    from opendbc.car.ford.values import FordFlags
+    params.put_bool("FordPrefHevDataAvailable", bool(CP.flags & FordFlags.HEV_CLUSTER_DATA))
+    params.put_bool("FordPrefHevBattDataAvailable", bool(CP.flags & FordFlags.HEV_BATTERY_DATA))
+  except Exception:
+    pass
+
+
 def publish_controller_state_bp(CI, pm):
   """Publish controllerStateBP if the car controller reports lateralUncertainty."""
   global _settings_last_read, _settings_cache

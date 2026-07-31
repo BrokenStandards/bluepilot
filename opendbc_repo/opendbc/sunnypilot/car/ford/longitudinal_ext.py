@@ -44,11 +44,6 @@ from opendbc.car.ford.values import CarControllerParams
 COASTING_MODE_LEGACY = 0
 COASTING_MODE_EXTENDED = 1
 
-# Params are files on disk: reading them on every 100Hz carcontroller frame puts real
-# I/O in the control loop, so refresh roughly once a second instead (same pattern as
-# the BP onroad UI widgets). Menu toggles applying up to 1s later is imperceptible.
-PARAM_REFRESH_FRAMES = 100
-
 
 # Result namedtuple returned by LongitudinalExt.update()
 LongitudinalResult = namedtuple('LongitudinalResult', [
@@ -109,28 +104,21 @@ class LongitudinalExt:
     self.ext_brake_actuate_last = False
     self.ext_precharge_actuate_last = False
 
-    # Toggles (updated from Params, throttled -- see PARAM_REFRESH_FRAMES)
+    # Settings (applied from the carControlSP snapshot -- see update_long_params)
     self.disable_BP_long_UI = False
-    self.disable_downhill_comp_UI = True
+    self.disable_downhill_comp_UI = False
     self.coasting_mode = COASTING_MODE_LEGACY  # FordPrefCoastingMode: 0=legacy, 1=extended
-    self._param_frame_counter = PARAM_REFRESH_FRAMES  # force a read on the first frame
 
-  def update_long_params(self, params):
-    """Read longitudinal-related Params from the UI.
+  def update_long_params(self, bp):
+    """Apply the BluePilot longitudinal settings snapshot.
 
-    Called every frame from CarController.update(), but the disk reads are throttled
-    to ~1Hz (see PARAM_REFRESH_FRAMES) to keep file I/O out of the 100Hz control loop.
+    `bp` is a structs.FordSettingsBP carried on carControlSP, refreshed by card.py's 10Hz
+    params thread (bluepilot/selfdrive/car/bp_ford_settings.py), which already clamps the
+    coasting mode to a known value.
     """
-    self._param_frame_counter += 1
-    if self._param_frame_counter < PARAM_REFRESH_FRAMES:
-      return
-    self._param_frame_counter = 0
-
-    self.disable_BP_long_UI = params.get_bool("disable_BP_long_UI")
-    self.disable_downhill_comp_UI = params.get_bool("disable_downhill_comp_UI")
-    # Any unrecognized stored value falls back to legacy
-    mode = int(params.get("FordPrefCoastingMode", return_default=True) or COASTING_MODE_LEGACY)
-    self.coasting_mode = COASTING_MODE_EXTENDED if mode == COASTING_MODE_EXTENDED else COASTING_MODE_LEGACY
+    self.disable_BP_long_UI = bp.disableBpLong
+    self.disable_downhill_comp_UI = bp.disableDownhillComp
+    self.coasting_mode = COASTING_MODE_EXTENDED if bp.coastingMode == COASTING_MODE_EXTENDED else COASTING_MODE_LEGACY
 
   def update(self, CC, CS, op_accel, op_gas, accel_due_to_pitch, v_ego_mph, stopping, target_speed):
     """
