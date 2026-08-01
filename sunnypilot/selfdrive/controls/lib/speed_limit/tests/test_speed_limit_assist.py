@@ -122,7 +122,6 @@ class TestSpeedLimitAssist:
       self.sla._speed_limit = confirmed_limit
       self.sla._speed_limit_final_last = confirmed_limit
       self.sla.prev_speed_limit_final_last_conv = round(confirmed_limit * self.speed_conv)
-      self.sla._confirmed_limit = confirmed_limit
 
   def test_initial_state(self):
     assert self.sla.state == SpeedLimitAssistState.disabled
@@ -293,30 +292,29 @@ class TestSpeedLimitAssist:
                     SPEED_LIMITS['highway'], True, 0, self.events_sp)
     assert self.sla.state in ACTIVE_STATES
 
-  def test_reconfirm_window_keeps_previous_cap(self):
-    # A new below-CST limit re-arms the handshake, but the cap must hold at the previously
-    # confirmed limit during the window — never release toward the (high) cluster ceiling
+  def test_active_limit_drop_auto_applies(self):
+    # once active, limit changes apply directly — chime + sign flash only, no re-confirm prompt
     self.initialize_active_state(self.pcm_long_max_set_speed, confirmed_limit=SPEED_LIMITS['highway'])
 
-    self.sla.update(True, False, SPEED_LIMITS['highway'], 0, self.pcm_long_max_set_speed,
-                    SPEED_LIMITS['residential'], SPEED_LIMITS['residential'], True, 0, self.events_sp)
-    assert self.sla.state == SpeedLimitAssistState.preActive
-    assert self.sla.output_v_target == SPEED_LIMITS['highway']
-
-    # consent applies the new limit
-    self.press_cruise_button()
+    self.events_sp.clear()
     self.sla.update(True, False, SPEED_LIMITS['highway'], 0, self.pcm_long_max_set_speed,
                     SPEED_LIMITS['residential'], SPEED_LIMITS['residential'], True, 0, self.events_sp)
     assert self.sla.state in ACTIVE_STATES
     assert self.sla.output_v_target == SPEED_LIMITS['residential']
+    # notified via the chime-only events, never the preActive text prompt
+    assert EventNameSP.speedLimitPreActive not in self.events_sp.names
+    assert (EventNameSP.speedLimitActive in self.events_sp.names or
+            EventNameSP.speedLimitChanged in self.events_sp.names)
 
-  def test_reconfirm_timeout_releases_cap(self):
-    self.initialize_active_state(self.pcm_long_max_set_speed, confirmed_limit=SPEED_LIMITS['highway'])
-    for _ in range(int(PRE_ACTIVE_GUARD_PERIOD[self.sla.pcm_op_long] / DT_MDL) + 2):
-      self.sla.update(True, False, SPEED_LIMITS['highway'], 0, self.pcm_long_max_set_speed,
-                      SPEED_LIMITS['residential'], SPEED_LIMITS['residential'], True, 0, self.events_sp)
-    assert self.sla.state == SpeedLimitAssistState.inactive
-    assert self.sla.output_v_target == V_CRUISE_UNSET
+  def test_active_limit_rise_auto_applies(self):
+    self.initialize_active_state(self.pcm_long_max_set_speed, confirmed_limit=SPEED_LIMITS['city'])
+
+    self.events_sp.clear()
+    self.sla.update(True, False, SPEED_LIMITS['city'], 0, self.pcm_long_max_set_speed,
+                    SPEED_LIMITS['highway'], SPEED_LIMITS['highway'], True, 0, self.events_sp)
+    assert self.sla.state in ACTIVE_STATES
+    assert self.sla.output_v_target == SPEED_LIMITS['highway']
+    assert EventNameSP.speedLimitPreActive not in self.events_sp.names
 
   def test_active_limit_loss_goes_pending(self):
     # coverage gap outlasting the resolver hold: the cap must release via pending (audible),
@@ -386,26 +384,29 @@ class TestSpeedLimitAssist:
                     SPEED_LIMITS['city'], True, 0, self.events_sp)
     assert EventNameSP.speedLimitRaiseSetSpeed not in self.events_sp.names
 
-  def test_set_speed_hint_after_activation(self):
-    # one-shot ceiling tip fires shortly after activation when the cluster is below the
-    # recommended value, and never again during the same engagement
-    modest_cluster = 45 * CV.MPH_TO_MS
+  def _drive_to_active_with_hint_window(self, modest_cluster):
     self.sla.state = SpeedLimitAssistState.preActive
     self.press_cruise_button()
-
     hint_seen = False
     for _ in range(int((SET_SPEED_HINT_DELAY + 1.) / DT_MDL)):
       self.events_sp.clear()
       self.sla.update(True, False, SPEED_LIMITS['city'], 0, modest_cluster, SPEED_LIMITS['city'],
                       SPEED_LIMITS['city'], True, 0, self.events_sp)
       hint_seen = hint_seen or EventNameSP.speedLimitSetSpeedHint in self.events_sp.names
-    assert self.sla.state in ACTIVE_STATES
-    assert hint_seen
+    return hint_seen
 
-    self.events_sp.clear()
-    self.sla.update(True, False, SPEED_LIMITS['city'], 0, modest_cluster, SPEED_LIMITS['city'],
+  def test_set_speed_hint_once_per_drive(self):
+    # one-shot ceiling tip fires shortly after the FIRST activation of the drive when the
+    # cluster is below the recommended value — never again, even across re-engagements
+    modest_cluster = 45 * CV.MPH_TO_MS
+    assert self._drive_to_active_with_hint_window(modest_cluster)
+    assert self.sla.state in ACTIVE_STATES
+
+    # disengage and re-engage: the tip must not repeat
+    self.sla.update(False, False, SPEED_LIMITS['city'], 0, modest_cluster, SPEED_LIMITS['city'],
                     SPEED_LIMITS['city'], True, 0, self.events_sp)
-    assert EventNameSP.speedLimitSetSpeedHint not in self.events_sp.names
+    assert self.sla.state == SpeedLimitAssistState.disabled
+    assert not self._drive_to_active_with_hint_window(modest_cluster)
 
   def test_suggested_set_speed_published(self):
     self.initialize_active_state(self.pcm_long_max_set_speed)
