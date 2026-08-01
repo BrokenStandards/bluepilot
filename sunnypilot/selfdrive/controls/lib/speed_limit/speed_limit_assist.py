@@ -92,6 +92,11 @@ class SpeedLimitAssist:
     self._minus_hold = 0.
     self._last_carstate_ts = 0.
 
+    # BluePilot: last speed limit (converted/rounded) we notified the driver about while active.
+    # Prevents re-alerting when map data flickers between "no limit" and the same limit, or when
+    # the resolved source flaps between car and map with sub-rounding float differences.
+    self._last_event_limit_conv = 0
+
     # TODO-SP: SLA's own output_a_target for planner
     # Solution functions mapped to respective states
     self.acceleration_solutions = {
@@ -124,6 +129,7 @@ class SpeedLimitAssist:
       events_sp.add(EventNameSP.speedLimitChanged)
     else:
       events_sp.add(EventNameSP.speedLimitActive)
+    self._last_event_limit_conv = self.speed_limit_final_last_conv
 
   def get_v_target_from_control(self) -> float:
     if self._has_speed_limit:
@@ -384,10 +390,16 @@ class SpeedLimitAssist:
       # only notify if we acquire a valid speed limit
       # do not check has_speed_limit here
       elif self._speed_limit != self.speed_limit_prev:
-        if self.speed_limit_prev <= 0:
-          self.update_active_event(events_sp)
-        elif self.speed_limit_prev > 0 and self._speed_limit > 0:
-          self.update_active_event(events_sp)
+        # BluePilot: only re-notify when the target actually changes in display units. Raw float
+        # inequality re-fires on source flaps (car<->map) and on 0 -> limit flicker over OSM
+        # coverage gaps, spamming a chime+alert every few seconds on the same posted limit.
+        if self.speed_limit_final_last_conv != self._last_event_limit_conv:
+          if self.speed_limit_prev <= 0:
+            self.update_active_event(events_sp)
+          elif self.speed_limit_prev > 0 and self._speed_limit > 0:
+            self.update_active_event(events_sp)
+    else:
+      self._last_event_limit_conv = 0
 
   def update(self, long_enabled: bool, long_override: bool, v_ego: float, a_ego: float, v_cruise_cluster: float, speed_limit: float,
              speed_limit_final_last: float, has_speed_limit: bool, distance: float, events_sp: EventsSP) -> None:

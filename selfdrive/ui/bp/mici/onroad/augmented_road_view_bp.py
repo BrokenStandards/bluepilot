@@ -13,6 +13,7 @@ from openpilot.selfdrive.ui.bp.mici.onroad.hud_renderer_bp import MiciHudRendere
 from openpilot.selfdrive.ui.bp.onroad.driver_state_bp import DriverStateRendererBP
 from openpilot.selfdrive.ui.bp.lib.dm_icon_style import DMIconStyle
 from openpilot.selfdrive.ui.bp.mici.onroad.complication import MiciComplication
+from openpilot.selfdrive.ui.bp.mici.onroad.speed_limit_sign_bp import MiciSpeedLimitSign
 from openpilot.selfdrive.ui.bp.mici.onroad.confidence_ball_bp import ConfidenceBallMiciBP
 from openpilot.selfdrive.ui.ui_state import ui_state, UIStatus
 from openpilot.selfdrive.ui.bp.lib.ui_debug_logger import bp_ui_log
@@ -85,6 +86,9 @@ class MiciAugmentedRoadViewBP(MiciCameraViewBP, AugmentedRoadView, BlindspotRend
 
     # BluePilot: Add lead car complication widget
     self._complication = MiciComplication()
+
+    # BluePilot: persistent speed limit / curve speed sign overlay
+    self._speed_limit_sign = MiciSpeedLimitSign()
 
     self._model_renderer = ModelRendererBP()
     self._lat_debug: LateralDebugMici | None = None
@@ -185,6 +189,9 @@ class MiciAugmentedRoadViewBP(MiciCameraViewBP, AugmentedRoadView, BlindspotRend
     if ui_state.started:
       self._alert_renderer.render(self._content_rect)
     self._hud_renderer.render(self._content_rect)
+
+    # BluePilot: speed limit / curve speed sign overlay (hides itself while visible alerts show)
+    self._speed_limit_sign.render(self._content_rect)
 
     bp_ui_log.scissor("MiciAugRoadView", "end")
     rl.end_scissor_mode()

@@ -208,19 +208,22 @@ EVENTS_SP: dict[int, dict[str, Alert | AlertCallbackType]] = {
       Priority.LOW, VisualAlert.none, AudibleAlert.none, 1.),
   },
 
+  # BluePilot: speed limit adjust notifications are chime-only. The visual is the flashing
+  # speed limit sign overlay in the UI (keyed off selfdriveState.alertType while these alerts
+  # are current), replacing the old text banner + dark gradient.
   EventNameSP.speedLimitActive: {
     ET.WARNING: Alert(
-      "Auto adjusting to speed limit",
       "",
-      AlertStatus.normal, AlertSize.small,
+      "",
+      AlertStatus.normal, AlertSize.none,
       Priority.LOW, VisualAlert.none, AudibleAlertSP.promptSingleHigh, 5.),
   },
 
   EventNameSP.speedLimitChanged: {
     ET.WARNING: Alert(
-      "Set speed changed",
       "",
-      AlertStatus.normal, AlertSize.small,
+      "",
+      AlertStatus.normal, AlertSize.none,
       Priority.LOW, VisualAlert.none, AudibleAlertSP.promptSingleHigh, 5.),
   },
 
@@ -230,9 +233,9 @@ EVENTS_SP: dict[int, dict[str, Alert | AlertCallbackType]] = {
 
   EventNameSP.speedLimitPending: {
     ET.WARNING: Alert(
-      "Auto adjusting to last speed limit",
       "",
-      AlertStatus.normal, AlertSize.small,
+      "",
+      AlertStatus.normal, AlertSize.none,
       Priority.LOW, VisualAlert.none, AudibleAlertSP.promptSingleHigh, 5.),
   },
 

@@ -371,6 +371,14 @@
       "enabled": true
     },
     {
+      "name": "BPSpeedLimitSignOverlay",
+      "default": true,
+      "type": "bool",
+      "flags": ["PERSISTENT", "BACKUP"],
+      "create_default": true,
+      "enabled": true
+    },
+    {
       "name": "BPRainbowLines",
       "default": false,
       "type": "bool",

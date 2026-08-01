@@ -3,6 +3,9 @@
     "6.1.0": {
       "agnos_version": "17.2",
       "changes": [
+        "Speed Limit Assist: fixed alert spam — 'adjusting to speed limit' no longer re-fires when map data flickers over OSM coverage gaps or the resolved source flaps between car and map on the same posted limit",
+        "Speed limit adjust notifications are now chime-only (no text banner / dark overlay); the visual is a flashing speed limit sign with underglow for the same duration",
+        "MICI: new persistent speed limit sign overlay (MUTCD/Vienna) with curve speed diamond showing the targeted vision/map curve speed; toggle via Visuals > Speed Limit Sign Overlay (BPSpeedLimitSignOverlay)",
         "Synced with latest upstream SunnyPilot (Chrysler CUSW, Rivian, Tesla, Honda, Hyundai updates)",
         "New is_bluepilot() detection system — all stock file overrides are now guarded and labeled",
         "Refactored BP overrides in card.py, cruise.py, and desire_helper.py into dedicated BP modules",
