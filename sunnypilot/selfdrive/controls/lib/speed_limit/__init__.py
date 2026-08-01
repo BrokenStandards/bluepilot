@@ -6,6 +6,9 @@ See the LICENSE.md file in the root directory for more details.
 """
 LIMIT_ADAPT_ACC = -1.  # m/s^2 Ideal acceleration for the adapting (braking) phase when approaching speed limits.
 LIMIT_MAX_MAP_DATA_AGE = 10.  # s Maximum time to hold to map data, then consider it invalid inside limits controllers.
+# s How long the last seen speed limit is held once the resolved limit becomes invalid. Bridges short
+# coverage gaps (OSM holes, source flaps) without capping the car on a stale limit indefinitely.
+LIMIT_LAST_HOLD_TIME = 10.
 
 # Speed Limit Assist constants
 PCM_LONG_REQUIRED_MAX_SET_SPEED = {

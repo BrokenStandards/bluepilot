@@ -13,7 +13,7 @@ from openpilot.common.gps import get_gps_location_service
 from openpilot.common.params import Params
 from openpilot.common.realtime import DT_MDL
 from openpilot.sunnypilot import PARAMS_UPDATE_PERIOD, get_sanitize_int_param
-from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit import LIMIT_MAX_MAP_DATA_AGE, LIMIT_ADAPT_ACC
+from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit import LIMIT_MAX_MAP_DATA_AGE, LIMIT_ADAPT_ACC, LIMIT_LAST_HOLD_TIME
 from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit.common import Policy, OffsetType
 
 SpeedLimitSource = custom.LongitudinalPlanSP.SpeedLimit.Source
@@ -73,6 +73,7 @@ class SpeedLimitResolver:
     self.speed_limit_final = 0.
     self.speed_limit_final_last = 0.
     self.speed_limit_offset = 0.
+    self._last_limit_hold_frames = 0
 
   def update_speed_limit_states(self) -> None:
     self.speed_limit_final = self.speed_limit + self.speed_limit_offset
@@ -80,6 +81,14 @@ class SpeedLimitResolver:
     if self.speed_limit > 0.:
       self.speed_limit_last = self.speed_limit
       self.speed_limit_final_last = self.speed_limit_final
+      self._last_limit_hold_frames = int(LIMIT_LAST_HOLD_TIME / DT_MDL)
+    elif self._last_limit_hold_frames > 0:
+      self._last_limit_hold_frames -= 1
+    else:
+      # held limit expired: SLA feeds speed_limit_final_last into the planner's min() whenever
+      # enabled, so a limit latched forever would keep capping the car on roads it no longer applies to
+      self.speed_limit_last = 0.
+      self.speed_limit_final_last = 0.
 
   @property
   def speed_limit_valid(self) -> bool:
@@ -119,12 +128,18 @@ class SpeedLimitResolver:
     self._reset_limit_sources(SpeedLimitSource.map)
     self._process_map_data(sm)
 
+  @staticmethod
+  def _gps_fix_age(gps_data) -> float:
+    # unixTimestampMillis carries Unix epoch wall time from the GPS receiver (ubloxd, qcomgpsd),
+    # so it must be aged against the wall clock. time.monotonic() counts from boot, which made
+    # this age hugely negative and silently disabled the guards below.
+    return time.time() - gps_data.unixTimestampMillis * 1e-3  # noqa: TID251
+
   def _process_map_data(self, sm: messaging.SubMaster) -> None:
     gps_data = sm[self._gps_location_service]
     map_data = sm['liveMapDataSP']
 
-    gps_fix_age = time.monotonic() - gps_data.unixTimestampMillis * 1e-3
-    if gps_fix_age > LIMIT_MAX_MAP_DATA_AGE:
+    if self._gps_fix_age(gps_data) > LIMIT_MAX_MAP_DATA_AGE:
       return
 
     speed_limit = map_data.speedLimit if map_data.speedLimitValid else 0.
@@ -136,13 +151,12 @@ class SpeedLimitResolver:
     gps_data = sm[self._gps_location_service]
     map_data = sm['liveMapDataSP']
 
-    distance_since_fix = self.v_ego * (time.monotonic() - gps_data.unixTimestampMillis * 1e-3)
+    distance_since_fix = self.v_ego * max(0., self._gps_fix_age(gps_data))
     distance_to_speed_limit_ahead = max(0., map_data.speedLimitAheadDistance - distance_since_fix)
 
     self.limit_solutions[SpeedLimitSource.map] = speed_limit
     self.distance_solutions[SpeedLimitSource.map] = 0.
 
-    # FIXME-SP: this is not working as expected
     if 0. < next_speed_limit < self.v_ego:
       adapt_time = (next_speed_limit - self.v_ego) / LIMIT_ADAPT_ACC
       adapt_distance = self.v_ego * adapt_time + 0.5 * LIMIT_ADAPT_ACC * adapt_time ** 2

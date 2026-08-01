@@ -26,9 +26,10 @@ def create_mock(properties, mocker: MockerFixture):
   return mock
 
 
-def setup_sm_mock(mocker: MockerFixture):
+def setup_sm_mock(mocker: MockerFixture, gps_fix_age: float = 0., map_limit: float | None = None,
+                  ahead_limit: float = 0., ahead_distance: float = 0.):
   cruise_speed_limit = random.uniform(0, 120)
-  live_map_data_limit = random.uniform(0, 120)
+  live_map_data_limit = map_limit if map_limit is not None else random.uniform(0, 120)
 
   car_state = create_mock({
     'gasPressed': False,
@@ -41,12 +42,14 @@ def setup_sm_mock(mocker: MockerFixture):
   live_map_data = create_mock({
     'speedLimit': live_map_data_limit,
     'speedLimitValid': True,
-    'speedLimitAhead': 0.,
-    'speedLimitAheadValid': 0.,
-    'speedLimitAheadDistance': 0.,
+    'speedLimitAhead': ahead_limit,
+    'speedLimitAheadValid': ahead_limit > 0.,
+    'speedLimitAheadDistance': ahead_distance,
   }, mocker)
   gps_data = create_mock({
-    'unixTimestampMillis': time.monotonic() * 1e3,
+    # Production publishers (ubloxd, qcomgpsd, the sim) fill unixTimestampMillis with Unix
+    # epoch wall time, so the fixture must model that clock domain, not time.monotonic().
+    'unixTimestampMillis': (time.time() - gps_fix_age) * 1e3,  # noqa: TID251
   }, mocker)
   sm_mock = mocker.MagicMock()
   sm_mock.__getitem__.side_effect = lambda key: {
@@ -137,8 +140,99 @@ class TestSpeedLimitResolverValidation:
   def test_old_map_data_ignored(self, resolver_class, policy, mocker: MockerFixture):
     resolver = resolver_class()
     resolver.policy = policy
-    sm_mock = mocker.MagicMock()
-    sm_mock['gpsLocation'].unixTimestampMillis = (time.monotonic() - 2 * LIMIT_MAX_MAP_DATA_AGE) * 1e3
+    resolver.v_ego = 27.8
+    sm_mock = setup_sm_mock(mocker, gps_fix_age=2 * LIMIT_MAX_MAP_DATA_AGE, map_limit=25.)
     resolver._get_from_map_data(sm_mock)
     assert resolver.limit_solutions[SpeedLimitSource.map] == 0.
     assert resolver.distance_solutions[SpeedLimitSource.map] == 0.
+
+
+@pytest.mark.parametrize("resolver_class", [SpeedLimitResolver])
+class TestSpeedLimitResolverMapDataClock:
+  """The map-data guards compare the GPS fix time (Unix epoch wall time in
+  unixTimestampMillis) against the current time. These tests feed production-faithful
+  epoch timestamps; comparing that field against time.monotonic() makes the fix age
+  hugely negative, silently disabling both the staleness guard and the upcoming-limit
+  adaptation."""
+
+  def test_fresh_gps_fix_accepts_map_data(self, resolver_class, mocker: MockerFixture):
+    resolver = resolver_class()
+    resolver.policy = Policy.map_data_only
+    resolver.v_ego = 27.8
+    sm_mock = setup_sm_mock(mocker, gps_fix_age=0., map_limit=25.)
+    resolver._get_from_map_data(sm_mock)
+    assert resolver.limit_solutions[SpeedLimitSource.map] == 25.
+
+  def test_no_gps_fix_rejects_map_data(self, resolver_class, mocker: MockerFixture):
+    resolver = resolver_class()
+    resolver.policy = Policy.map_data_only
+    resolver.v_ego = 27.8
+    sm_mock = setup_sm_mock(mocker, map_limit=25.)
+    sm_mock['gpsLocation'].unixTimestampMillis = 0
+    resolver._get_from_map_data(sm_mock)
+    assert resolver.limit_solutions[SpeedLimitSource.map] == 0.
+
+  def test_ahead_limit_adopted_within_adapt_distance(self, resolver_class, mocker: MockerFixture):
+    # 100 km/h now, 50 km/h posted 50 m ahead: braking at LIMIT_ADAPT_ACC needs ~290 m,
+    # so the resolver must adopt the upcoming limit and expose the distance to it.
+    v_ego = 27.8
+    resolver = resolver_class()
+    resolver.policy = Policy.map_data_only
+    sm_mock = setup_sm_mock(mocker, map_limit=27.8, ahead_limit=13.9, ahead_distance=50.)
+    resolver.update(v_ego, sm_mock)
+    assert resolver.speed_limit == pytest.approx(13.9, abs=0.01)
+    assert resolver.distance == pytest.approx(50., abs=5.)
+
+  def test_ahead_limit_ignored_beyond_adapt_distance(self, resolver_class, mocker: MockerFixture):
+    v_ego = 27.8
+    resolver = resolver_class()
+    resolver.policy = Policy.map_data_only
+    sm_mock = setup_sm_mock(mocker, map_limit=27.8, ahead_limit=13.9, ahead_distance=5000.)
+    resolver.update(v_ego, sm_mock)
+    assert resolver.speed_limit == pytest.approx(27.8, abs=0.01)
+    assert resolver.distance == 0.
+
+
+@pytest.mark.parametrize("resolver_class", [SpeedLimitResolver])
+class TestSpeedLimitResolverLastLimitHold:
+  """speed_limit_last bridges short gaps in coverage (OSM holes, source flaps), but must
+  not persist a stale limit indefinitely: SLA feeds speed_limit_final_last into the
+  planner's min() whenever it is enabled, so a limit latched forever keeps capping the
+  car long after leaving the road it was posted on."""
+
+  def _run_gap_frames(self, resolver, sm_mock, frames):
+    sm_mock['liveMapDataSP'].speedLimitValid = False
+    sm_mock['liveMapDataSP'].speedLimit = 0.
+    for _ in range(frames):
+      resolver.update(27.8, sm_mock)
+
+  def _make_resolver_with_limit(self, resolver_class, mocker):
+    resolver = resolver_class()
+    resolver.policy = Policy.map_data_only
+    mocker.patch.object(resolver, 'update_params')
+    sm_mock = setup_sm_mock(mocker, map_limit=25.)
+    resolver.update(27.8, sm_mock)
+    assert resolver.speed_limit_last == 25.
+    return resolver, sm_mock
+
+  def test_last_limit_held_through_short_gap(self, resolver_class, mocker: MockerFixture):
+    resolver, sm_mock = self._make_resolver_with_limit(resolver_class, mocker)
+    self._run_gap_frames(resolver, sm_mock, 40)  # 2 s at DT_MDL
+    assert resolver.speed_limit_last == 25.
+    assert resolver.speed_limit_last_valid
+
+  def test_last_limit_expires_after_hold_period(self, resolver_class, mocker: MockerFixture):
+    resolver, sm_mock = self._make_resolver_with_limit(resolver_class, mocker)
+    self._run_gap_frames(resolver, sm_mock, 240)  # 12 s at DT_MDL, past the 10 s hold
+    assert resolver.speed_limit_last == 0.
+    assert resolver.speed_limit_final_last == 0.
+    assert not resolver.speed_limit_last_valid
+
+  def test_limit_reacquired_after_expiry(self, resolver_class, mocker: MockerFixture):
+    resolver, sm_mock = self._make_resolver_with_limit(resolver_class, mocker)
+    self._run_gap_frames(resolver, sm_mock, 240)
+    sm_mock['liveMapDataSP'].speedLimitValid = True
+    sm_mock['liveMapDataSP'].speedLimit = 19.4
+    resolver.update(27.8, sm_mock)
+    assert resolver.speed_limit_last == pytest.approx(19.4)
+    assert resolver.speed_limit_last_valid
