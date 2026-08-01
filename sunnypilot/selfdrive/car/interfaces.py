@@ -59,6 +59,9 @@ def _initialize_intelligent_cruise_button_management(CP: structs.CarParams, CP_S
   if params is None:
     params = Params()
 
+  # BluePilot: only stock long flips pcmCruiseSpeed (virtual set speed). Under alpha long, ICBM
+  # runs in its own mode (cluster walked to SLA target + margin) with pcmCruiseSpeed left True —
+  # flipping it would change engagement and v_cruise semantics globally.
   icbm_enabled = params.get_bool("IntelligentCruiseButtonManagement")
   if icbm_enabled and CP_SP.intelligentCruiseButtonManagementAvailable and not CP.openpilotLongitudinalControl:
     CP_SP.pcmCruiseSpeed = False
@@ -78,8 +81,10 @@ def _cleanup_unsupported_params(CP: structs.CarParams, CP_SP: structs.CarParamsS
     params.remove("NeuralNetworkLateralControl")
     params.remove("EnforceTorqueControl")
 
-  if not CP_SP.intelligentCruiseButtonManagementAvailable or CP.openpilotLongitudinalControl:
-    cloudlog.warning("ICBM not available or openpilot Longitudinal Control enabled, cleaning up params")
+  # BluePilot: ICBM is also supported under alpha long (cluster walked to SLA target + margin),
+  # so the param is only cleaned up when ICBM is genuinely unavailable on the platform.
+  if not CP_SP.intelligentCruiseButtonManagementAvailable:
+    cloudlog.warning("ICBM not available, cleaning up params")
     params.remove("IntelligentCruiseButtonManagement")
 
   if not CP.openpilotLongitudinalControl and CP_SP.pcmCruiseSpeed:

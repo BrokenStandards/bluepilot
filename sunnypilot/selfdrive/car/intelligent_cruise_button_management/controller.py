@@ -18,6 +18,7 @@ SendButtonState = custom.IntelligentCruiseButtonManagement.SendButtonState
 ALLOWED_SPEED_THRESHOLD = 1.8  # m/s, ~4 MPH
 HYST_GAP = 0.0  # currently disabled; TODO-SP: might need to be brand-specific
 INACTIVE_TIMER = 0.4
+V_CRUISE_UNSET = 255.  # m/s sentinel published by inactive SLA/SCC controllers
 
 
 SEND_BUTTONS = {
@@ -44,14 +45,44 @@ class IntelligentCruiseButtonManagement:
     self.is_metric = False
 
     self.cruise_button_timers = CRUISE_BUTTON_TIMER
-    
+
     # BluePilot: Track initial cruise speed when first enabled
     self.initial_cruise_speed_kph = 0
     self.cruise_enabled_prev = False
 
+    # BluePilot: alpha-long ICBM — walk the physical cluster to (SLA target + margin) while
+    # openpilot longitudinal drives, so the cluster ceiling (and the PCM's near-set-speed accel
+    # gate) never limits acceleration to the desired speed. pcmCruiseSpeed stays True in this
+    # mode; enable + margin are fed by selfdrived's params thread.
+    self.alpha_long_mode_allowed = bool(CP.openpilotLongitudinalControl and CP_SP.intelligentCruiseButtonManagementAvailable)
+    self.alpha_long_enabled = False
+    self.alpha_long_offset = 5  # display units (km/h or mph)
+
+  @property
+  def alpha_long_active(self) -> bool:
+    return self.alpha_long_mode_allowed and self.alpha_long_enabled
+
   @property
   def v_cruise_equal(self) -> bool:
     return self.v_target == self.v_cruise_cluster
+
+  def _update_alpha_long_calculations(self, CS: car.CarState, LP_SP: custom.LongitudinalPlanSP) -> None:
+    speed_conv = CV.MS_TO_KPH if self.is_metric else CV.MS_TO_MPH
+
+    self.v_cruise_min = get_minimum_set_speed(self.is_metric)
+    self.v_cruise_cluster = round(CS.cruiseState.speedCluster * speed_conv)
+
+    # The reference is SLA's limit target, never LP_SP.vTarget: vTarget is min()'d with the
+    # cluster set speed itself, so a cluster walked toward it could only ratchet downward.
+    # SCC curve targets are deliberately excluded — transient curve slowdowns should not churn
+    # the physical cluster.
+    assist = LP_SP.speedLimit.assist
+    max_reasonable = 145 if self.is_metric else 90
+    if assist.active and 0. < assist.vTarget < V_CRUISE_UNSET:
+      self.v_target = min(round(assist.vTarget * speed_conv) + self.alpha_long_offset, max_reasonable)
+    else:
+      # nothing to manage — leave the cluster where the driver put it
+      self.v_target = self.v_cruise_cluster
 
   def update_calculations(self, CS: car.CarState, LP_SP: custom.LongitudinalPlanSP) -> None:
     speed_conv = CV.MS_TO_KPH if self.is_metric else CV.MS_TO_MPH
@@ -71,7 +102,7 @@ class IntelligentCruiseButtonManagement:
     self.v_target = round(self.v_target_ms_last * speed_conv)
     self.v_cruise_min = get_minimum_set_speed(self.is_metric)
     self.v_cruise_cluster = round(CS.cruiseState.speedCluster * speed_conv)
-    
+
     # BluePilot: If planner target is invalid/unreasonable and we have an initial cruise speed,
     # use the initial speed as the target (or cluster speed if it's been set)
     MAX_REASONABLE_TARGET = 145 if self.is_metric else 90
@@ -104,13 +135,16 @@ class IntelligentCruiseButtonManagement:
               # Don't increase if target exceeds initial cruise speed by more than 5 mph/kph
               MAX_REASONABLE_TARGET = 145 if self.is_metric else 90
               MAX_INITIAL_INCREASE = 5  # Allow small increases from initial speed
-              
-              if self.v_cruise_cluster == 0 or self.v_target >= MAX_REASONABLE_TARGET:
+
+              if self.v_cruise_cluster == 0 or self.v_target > MAX_REASONABLE_TARGET:
                 # Don't increase - stay in preActive or go to holding
                 self.state = State.holding
-              elif self.initial_cruise_speed_kph > 0 and self.v_target > (self.initial_cruise_speed_kph + MAX_INITIAL_INCREASE):
+              elif not self.alpha_long_active and self.initial_cruise_speed_kph > 0 and \
+                   self.v_target > (self.initial_cruise_speed_kph + MAX_INITIAL_INCREASE):
                 # Don't increase beyond initial cruise speed + small margin
-                # This prevents ICBM from ramping up when cruise is first enabled
+                # This prevents ICBM from ramping up when cruise is first enabled.
+                # BluePilot: not applied in alpha-long mode — there the target is the driver-confirmed
+                # speed limit + margin, which may legitimately sit far above the engagement speed.
                 self.state = State.holding
               else:
                 self.state = State.increasing
@@ -161,12 +195,17 @@ class IntelligentCruiseButtonManagement:
     self.is_ready = ready and not button_pressed
 
   def run(self, CS: car.CarState, CC: car.CarControl, LP_SP: custom.LongitudinalPlanSP, is_metric: bool) -> None:
-    if self.CP_SP.pcmCruiseSpeed:
+    # BluePilot: pcmCruiseSpeed stays True under alpha long (flipping it would change engagement
+    # and v_cruise semantics globally), so the alpha-long mode gets its own gate here.
+    if self.CP_SP.pcmCruiseSpeed and not self.alpha_long_active:
       return
 
     self.is_metric = is_metric
 
-    self.update_calculations(CS, LP_SP)
+    if self.alpha_long_active:
+      self._update_alpha_long_calculations(CS, LP_SP)
+    else:
+      self.update_calculations(CS, LP_SP)
     self.update_readiness(CS, CC)
 
     self.cruise_button = self.update_state_machine()

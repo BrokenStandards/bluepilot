@@ -52,11 +52,27 @@ sections:
       equals: true
     enablement:
     - $ref: '#/macros/offroad'
-    - type: not
-      condition:
-        type: capability
-        field: has_longitudinal_control
-        equals: true
+  - key: AlphaLongIcbmOffset
+    widget: option
+    title: Alpha Long ICBM Set Speed Margin
+    description: How far above the desired speed ICBM keeps the cluster set speed when openpilot
+      longitudinal is active, so the vehicle's own cruise module never limits acceleration near
+      the target. Vehicle dependent.
+    min: 1
+    max: 15
+    step: 1
+    unit:
+      metric: km/h
+      imperial: mph
+    visibility:
+    - type: capability
+      field: icbm_available
+      equals: true
+    enablement:
+    - $ref: '#/macros/offroad'
+    - type: param
+      key: IntelligentCruiseButtonManagement
+      equals: true
 - id: custom_acc_increments
   title: Custom ACC Speed Intervals
   description: ''

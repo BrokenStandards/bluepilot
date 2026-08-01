@@ -634,14 +634,36 @@
               "enablement": [
                 {
                   "type": "offroad_only"
+                }
+              ]
+            },
+            {
+              "key": "AlphaLongIcbmOffset",
+              "widget": "option",
+              "title": "Alpha Long ICBM Set Speed Margin",
+              "description": "How far above the desired speed ICBM keeps the cluster set speed when openpilot longitudinal is active, so the vehicle's own cruise module never limits acceleration near the target. Vehicle dependent.",
+              "min": 1,
+              "max": 15,
+              "step": 1,
+              "unit": {
+                "metric": "km/h",
+                "imperial": "mph"
+              },
+              "visibility": [
+                {
+                  "type": "capability",
+                  "field": "icbm_available",
+                  "equals": true
+                }
+              ],
+              "enablement": [
+                {
+                  "type": "offroad_only"
                 },
                 {
-                  "type": "not",
-                  "condition": {
-                    "type": "capability",
-                    "field": "has_longitudinal_control",
-                    "equals": true
-                  }
+                  "type": "param",
+                  "key": "IntelligentCruiseButtonManagement",
+                  "equals": true
                 }
               ]
             }

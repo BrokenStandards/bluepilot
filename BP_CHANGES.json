@@ -3,6 +3,9 @@
     "6.1.0": {
       "agnos_version": "17.2",
       "changes": [
+        "Speed Limit Assist: any set speed over the limit now works under openpilot longitudinal (alpha long) — the exact 120/130 km/h (70/80 mph) cluster handshake is replaced by a single SET+/SET− press to confirm (same handshake ICBM uses); the cluster set speed is only a ceiling",
+        "Speed Limit Assist: one-shot prompts — a post-activation tip recommending a 130 km/h / 80 mph ceiling for full range, and a raise-set-speed prompt (limit + margin) when the cluster sits below the limit; never nags, once per episode",
+        "ICBM under alpha long: walks the physical cluster set speed to the confirmed speed limit plus a configurable margin (new 'Alpha Long ICBM Set Speed Margin' setting, default +5 km/h/mph, vehicle dependent) so the vehicle's cruise module never limits acceleration near the target",
         "Speed Limit Assist: fixed alert spam — 'adjusting to speed limit' no longer re-fires when map data flickers over OSM coverage gaps or the resolved source flaps between car and map on the same posted limit",
         "Speed limit adjust notifications are now chime-only (no text banner / dark overlay); the visual is a flashing speed limit sign with underglow for the same duration",
         "MICI: new persistent speed limit sign overlay (MUTCD/Vienna) with curve speed diamond showing the targeted vision/map curve speed; toggle via Visuals > Speed Limit Sign Overlay (BPSpeedLimitSignOverlay)",
@@ -22,6 +25,9 @@
         "Added replay tool support for non-larch64 architectures"
       ],
       "fixes": [
+        "Speed limit resolver: map-data staleness guard and upcoming-limit adaptation were dead code (monotonic vs Unix-epoch clock mismatch); stale GPS fixes now invalidate map limits and the car adapts toward a lower limit ahead",
+        "Speed limit resolver: the last seen limit no longer latches forever — held 10 s to bridge OSM coverage gaps, then released so a stale limit cannot cap the car indefinitely",
+        "Speed Limit Assist: no more capping to an unconfirmed limit during the preActive window; 'inactive' state is recoverable (new limit re-arms the handshake) instead of a dead end until re-engagement",
         "Fixed BigButtonBP crash after upstream removed icon_size parameter",
         "Fixed MiciLabel import crash after upstream replaced it with UnifiedLabel",
         "Fixed BigConfirmationDialogV2 rename to BigConfirmationDialog",

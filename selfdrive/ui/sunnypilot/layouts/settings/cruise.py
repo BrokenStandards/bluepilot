@@ -21,9 +21,13 @@ class PanelType(IntEnum):
 
 ICBM_DESC = tr_noop("When enabled, sunnypilot will attempt to manage the built-in cruise control buttons " +
                     "by emulating button presses for limited longitudinal control.")
+# BluePilot: ICBM also runs under alpha long, walking the cluster set speed to the confirmed
+# speed limit plus a configurable margin.
+ICBM_ALPHA_LONG_DESC = tr_noop("With openpilot longitudinal active, ICBM keeps the cluster set speed at the confirmed " +
+                               "speed limit plus the margin below, so the vehicle never limits acceleration near the target.")
+ICBM_OFFSET_DESC = tr_noop("How far above the desired speed ICBM keeps the cluster set speed under openpilot longitudinal. " +
+                           "Vehicle dependent: must clear the cruise module's near-set-speed acceleration limit.")
 ICMB_UNAVAILABLE = tr_noop("Intelligent Cruise Button Management is currently unavailable on this platform.")
-ICMB_UNAVAILABLE_LONG_AVAILABLE = tr_noop("Disable the sunnypilot Longitudinal Control (alpha) toggle to allow Intelligent Cruise Button Management.")
-ICMB_UNAVAILABLE_LONG_UNAVAILABLE = tr_noop("sunnypilot Longitudinal Control is the default longitudinal control for this platform.")
 
 ACC_ENABLED_DESCRIPTION = tr_noop("Enable custom Short & Long press increments for cruise speed increase/decrease.")
 ACC_NOLONG_DESCRIPTION = tr_noop("This feature can only be used with sunnypilot longitudinal control enabled.")
@@ -46,6 +50,14 @@ class CruiseLayout(Widget):
       title=tr("Intelligent Cruise Button Management (ICBM) (Alpha)"),
       description="",
       param="IntelligentCruiseButtonManagement")
+
+    self.icbm_offset_item = option_item_sp(
+      title=tr("Alpha Long ICBM Set Speed Margin"),
+      param="AlphaLongIcbmOffset",
+      min_value=1, max_value=15, value_change_step=1,
+      description=tr(ICBM_OFFSET_DESC),
+      label_callback=self._get_icbm_offset_label,
+      inline=True)
 
     self.scc_v_toggle = toggle_item_sp(
       title=tr("Smart Cruise Control - Vision"),
@@ -89,6 +101,7 @@ class CruiseLayout(Widget):
 
     items = [
       self.icbm_toggle,
+      self.icbm_offset_item,
       self.dec_toggle,
       self.scc_v_toggle,
       self.scc_m_toggle,
@@ -116,6 +129,11 @@ class CruiseLayout(Widget):
     if panel == PanelType.SLA:
       self._speed_limit_layout.show_event()
 
+  @staticmethod
+  def _get_icbm_offset_label(value):
+    unit = tr("km/h") if ui_state.is_metric else tr("mph")
+    return f"+{value} {unit}"
+
   def _update_state(self):
     super()._update_state()
 
@@ -123,24 +141,24 @@ class CruiseLayout(Widget):
       has_icbm = ui_state.has_icbm
       has_long = ui_state.has_longitudinal_control
 
-      if ui_state.CP_SP.intelligentCruiseButtonManagementAvailable and not has_long:
+      # BluePilot: ICBM is allowed with or without alpha long — under alpha long it walks the
+      # cluster to the confirmed limit + margin instead of owning the set speed.
+      if ui_state.CP_SP.intelligentCruiseButtonManagementAvailable:
         self.icbm_toggle.action_item.set_enabled(ui_state.is_offroad())
-        self.icbm_toggle.set_description(tr(ICBM_DESC))
+        new_desc = tr(ICBM_DESC) if not has_long else tr(ICBM_DESC) + "\n\n" + tr(ICBM_ALPHA_LONG_DESC)
+        if self.icbm_toggle.description != new_desc:
+          self.icbm_toggle.set_description(new_desc)
       else:
         ui_state.params.remove("IntelligentCruiseButtonManagement")
         self.icbm_toggle.action_item.set_enabled(False)
 
-        long_desc = ICMB_UNAVAILABLE
-        if has_long:
-          if ui_state.CP.alphaLongitudinalAvailable:
-            long_desc += " " + ICMB_UNAVAILABLE_LONG_AVAILABLE
-          else:
-            long_desc += " " + ICMB_UNAVAILABLE_LONG_UNAVAILABLE
-
-        new_desc = "<b>" + tr(long_desc) + "</b>\n\n" + tr(ICBM_DESC)
+        new_desc = "<b>" + tr(ICMB_UNAVAILABLE) + "</b>\n\n" + tr(ICBM_DESC)
         if self.icbm_toggle.description != new_desc:
           self.icbm_toggle.set_description(new_desc)
           self.icbm_toggle.show_description(True)
+
+      # margin spinner only matters for alpha-long ICBM
+      self.icbm_offset_item.action_item.set_enabled(has_icbm and has_long and ui_state.is_offroad())
 
       if has_long or has_icbm:
         self.custom_acc_toggle.action_item.set_enabled(((has_long and not ui_state.CP.pcmCruise) or has_icbm) and ui_state.is_offroad())

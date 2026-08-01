@@ -638,6 +638,11 @@ class SelfdriveD(CruiseHelper):
       self.personality = self.params.get("LongitudinalPersonality", return_default=True)
 
       self.mads.read_params()
+
+      # BluePilot: alpha-long ICBM enable + cluster margin, consumed by the ICBM controller
+      self.icbm.alpha_long_enabled = self.params.get_bool("IntelligentCruiseButtonManagement")
+      self.icbm.alpha_long_offset = int(self.params.get("AlphaLongIcbmOffset", return_default=True))
+
       time.sleep(0.1)
 
   def run(self):

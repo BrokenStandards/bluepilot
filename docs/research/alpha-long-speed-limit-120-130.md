@@ -135,15 +135,27 @@ BluePilot's conservative alpha-long accel tuning (`longitudinalTuning.kpV = [0.]
    (`speed_limit_assist.py:128-136` with `ENABLED_STATES`). An old lower limit from a road you
    left can cap the car long after.
 
-## 5. Planned work on this branch
+## 5. Work implemented on this branch
 
-1. Tests demonstrating bugs 1–3, then fixes, verified by those tests (and the existing
-   `speed_limit` suites).
-2. **Alpha long with any speed over the limit:** replace the pcm-long 120/130 exact-match with
-   the press-again-to-confirm handshake already used by the non-PCM path; after confirmation,
-   a one-shot, non-nagging prompt suggesting 130 for best experience; if the cluster sits
-   below the desired speed, prompt to raise it to desired + offset.
-3. **ICBM under alpha long:** let ICBM walk the physical cluster to the desired target plus a
-   new user-configurable margin ("alpha long ICBM added threshold", default ~5 km/h) so the
-   Ford PCM's near-set-speed accel gate never binds; the margin is configurable because the
-   gate width is vehicle-dependent.
+1. **Resolver bug fixes** (`speed limit: fix dead map-data guards`): the clock-domain mismatch
+   is fixed with a wall-clock `_gps_fix_age()` helper (staleness guard and ahead-limit
+   adaptation both live now), and the last seen limit expires after `LIMIT_LAST_HOLD_TIME`
+   (10 s) instead of latching forever. All three bugs were first demonstrated by tests that
+   failed against the old code (8 failures), then fixed and verified.
+2. **Any speed over the limit** (`speed limit assist: any set speed over the limit under pcm
+   long`): `PCM_LONG_REQUIRED_MAX_SET_SPEED` is retired. Consent in `preActive` is a single
+   SET+/SET− press in either direction (or the cluster already matching the limit, e.g. after
+   ICBM parks it there). SLA output requires `is_active` on the pcm path (no more unconfirmed
+   capping), cluster changes only deactivate when attributed to a driver press (with a grace
+   window after the confirm press), and `inactive` is recoverable. One-shot prompts: a
+   post-activation tip recommending `PCM_LONG_RECOMMENDED_SET_SPEED` (130 km/h / 80 mph), and
+   a raise-set-speed prompt to limit + `AlphaLongIcbmOffset` when the cluster sits below the
+   limit. The suggested value is published as
+   `longitudinalPlanSP.speedLimit.assist.suggestedSetSpeed`.
+3. **ICBM under alpha long** (`icbm: run under alpha long`): ICBM gets an alpha-long mode
+   (pcmCruiseSpeed stays True) that walks the physical cluster to SLA's confirmed limit plus
+   the configurable `AlphaLongIcbmOffset` margin (default +5, display units, vehicle
+   dependent). The reference is SLA's target — never `LP_SP.vTarget`, which is min()'d with
+   the cluster itself and would ratchet the ceiling down. SCC curve targets are deliberately
+   excluded so transient curve slowdowns do not churn the cluster. Panda safety needed no
+   changes: `Steering_Data_FD1` SET+/SET− TX is already allowlisted under `LONG_CONTROL`.

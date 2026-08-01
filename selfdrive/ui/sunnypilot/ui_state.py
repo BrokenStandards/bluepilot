@@ -207,9 +207,11 @@ class UIStateSP:
       self.params.remove("ExperimentalMode")
       self.params.remove("DynamicExperimentalControl")
 
-    # ICBM: clear if not available or if full longitudinal control is active
+    # ICBM: clear only if not available on the platform.
+    # BluePilot: ICBM is also supported under alpha long (cluster walked to SLA target + margin),
+    # so full longitudinal control no longer disables it.
     if self.CP_SP is not None:
-      if not self.CP_SP.intelligentCruiseButtonManagementAvailable or has_long:
+      if not self.CP_SP.intelligentCruiseButtonManagementAvailable:
         self.params.remove("IntelligentCruiseButtonManagement")
         self.has_icbm = False
     else:
