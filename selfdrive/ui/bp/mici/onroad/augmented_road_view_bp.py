@@ -14,6 +14,7 @@ from openpilot.selfdrive.ui.bp.onroad.driver_state_bp import DriverStateRenderer
 from openpilot.selfdrive.ui.bp.lib.dm_icon_style import DMIconStyle
 from openpilot.selfdrive.ui.bp.mici.onroad.complication import MiciComplication
 from openpilot.selfdrive.ui.bp.mici.onroad.speed_limit_sign_bp import MiciSpeedLimitSign
+from openpilot.selfdrive.ui.bp.mici.onroad.long_target_hud_bp import MiciLongTargetHud
 from openpilot.selfdrive.ui.bp.mici.onroad.confidence_ball_bp import ConfidenceBallMiciBP
 from openpilot.selfdrive.ui.ui_state import ui_state, UIStatus
 from openpilot.selfdrive.ui.bp.lib.ui_debug_logger import bp_ui_log
@@ -89,6 +90,9 @@ class MiciAugmentedRoadViewBP(MiciCameraViewBP, AugmentedRoadView, BlindspotRend
 
     # BluePilot: persistent speed limit / curve speed sign overlay
     self._speed_limit_sign = MiciSpeedLimitSign()
+
+    # BluePilot: longitudinal target debug HUD (plan speed/accel + primary limiter)
+    self._long_target_hud = MiciLongTargetHud()
 
     self._model_renderer = ModelRendererBP()
     self._lat_debug: LateralDebugMici | None = None
@@ -192,6 +196,9 @@ class MiciAugmentedRoadViewBP(MiciCameraViewBP, AugmentedRoadView, BlindspotRend
 
     # BluePilot: speed limit / curve speed sign overlay (hides itself while visible alerts show)
     self._speed_limit_sign.render(self._content_rect)
+
+    # BluePilot: longitudinal target debug HUD, above the steering wheel
+    self._long_target_hud.render(self._content_rect)
 
     bp_ui_log.scissor("MiciAugRoadView", "end")
     rl.end_scissor_mode()

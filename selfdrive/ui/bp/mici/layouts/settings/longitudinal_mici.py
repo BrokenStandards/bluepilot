@@ -19,18 +19,21 @@ class LongitudinalLayoutMici(NavScroller):
     )
     self.disable_downhill_comp = BigParamControlBP("Disable Downhill Compensation", "disable_downhill_comp_UI")
     self.disable_ford_radar = BigParamControlBP("Disable Ford Radar (Vision-Only Leads)", "disable_ford_radar_UI")
+    self.long_target_hud = BigParamControlBP("Longitudinal Target HUD", "BPLongitudinalTargetHUD")
 
     self._scroller.add_widgets([
       self.disable_BP_long,
       self.coasting_mode,
       self.disable_downhill_comp,
       self.disable_ford_radar,
+      self.long_target_hud,
     ])
 
     self._refresh_toggles = (
       ("disable_BP_long_UI", self.disable_BP_long),
       ("disable_downhill_comp_UI", self.disable_downhill_comp),
       ("disable_ford_radar_UI", self.disable_ford_radar),
+      ("BPLongitudinalTargetHUD", self.long_target_hud),
     )
 
     ui_state.add_offroad_transition_callback(self._update_toggles)

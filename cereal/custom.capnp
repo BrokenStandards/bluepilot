@@ -194,6 +194,20 @@ struct LongitudinalPlanSP @0xf35cc4560bbf6ec2 {
   aTarget @5 :Float32;
   events @6 :List(OnroadEventSP.Event);
   e2eAlerts @7 :E2eAlerts;
+  primaryLimiter @8 :PrimaryLimiter;  # BluePilot: which constraint produced this frame's accel target
+
+  enum PrimaryLimiter {
+    none @0;
+    cruise @1;            # cluster/driver set speed obstacle
+    sccVision @2;         # vision curve speed
+    sccMap @3;            # map curve speed
+    speedLimitAssist @4;  # resolved speed limit
+    lead @5;              # lead car constraint won the mpc
+    model @6;             # e2e/blended model accel won the min
+    accelClip @7;         # comfort/turn/coast accel schedule clipped the request
+    stopped @8;           # plan says stop
+    forceDecel @9;        # forced deceleration (e.g. driver monitoring)
+  }
 
   struct DynamicExperimentalControl {
     state @0 :DynamicExperimentalControlState;

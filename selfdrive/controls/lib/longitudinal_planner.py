@@ -15,7 +15,7 @@ from openpilot.selfdrive.controls.lib.drive_helpers import CONTROL_N, get_accel_
 from openpilot.selfdrive.car.cruise import V_CRUISE_MAX, V_CRUISE_UNSET
 from openpilot.common.swaglog import cloudlog
 
-from openpilot.sunnypilot.selfdrive.controls.lib.longitudinal_planner import LongitudinalPlannerSP
+from openpilot.sunnypilot.selfdrive.controls.lib.longitudinal_planner import LongitudinalPlannerSP, classify_primary_limiter
 
 A_CRUISE_MAX_VALS = [1.6, 1.2, 0.8, 0.6]
 A_CRUISE_MAX_BP = [0., 10.0, 25., 40.]
@@ -173,6 +173,12 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
       accel_clip[idx] = np.clip(accel_clip[idx], self.prev_accel_clip[idx] - 0.05, self.prev_accel_clip[idx] + 0.05)
     self.output_a_target = np.clip(output_a_target, accel_clip[0], accel_clip[1])
     self.prev_accel_clip = accel_clip
+
+    # BluePilot: name this frame's binding constraint for the longitudinal target HUD.
+    # The clip comparison must happen here — it is not derivable from published data.
+    accel_clip_bound = bool(self.output_a_target != output_a_target)
+    self.primary_limiter = classify_primary_limiter(bool(self.output_should_stop), bool(force_slow_decel),
+                                                    accel_clip_bound, self.mpc.source, self.source)
 
   def publish(self, sm, pm):
     plan_send = messaging.new_message('longitudinalPlan')

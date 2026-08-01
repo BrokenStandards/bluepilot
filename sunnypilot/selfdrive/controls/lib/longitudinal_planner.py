@@ -5,7 +5,7 @@ This file is part of sunnypilot and is licensed under the MIT License.
 See the LICENSE.md file in the root directory for more details.
 """
 
-from cereal import messaging, custom
+from cereal import log, messaging, custom
 from opendbc.car import structs
 from openpilot.common.constants import CV
 from openpilot.selfdrive.car.cruise import V_CRUISE_MAX
@@ -19,6 +19,36 @@ from openpilot.sunnypilot.models.helpers import get_active_bundle
 
 DecState = custom.LongitudinalPlanSP.DynamicExperimentalControl.DynamicExperimentalControlState
 LongitudinalPlanSource = custom.LongitudinalPlanSP.LongitudinalPlanSource
+PrimaryLimiter = custom.LongitudinalPlanSP.PrimaryLimiter
+StockPlanSource = log.LongitudinalPlan.LongitudinalPlanSource
+
+# BluePilot: SP min() source -> published limiter, when the mpc's cruise obstacle binds
+_SP_SOURCE_TO_LIMITER = {
+  LongitudinalPlanSource.cruise: PrimaryLimiter.cruise,
+  LongitudinalPlanSource.sccVision: PrimaryLimiter.sccVision,
+  LongitudinalPlanSource.sccMap: PrimaryLimiter.sccMap,
+  LongitudinalPlanSource.speedLimitAssist: PrimaryLimiter.speedLimitAssist,
+}
+
+
+def classify_primary_limiter(should_stop: bool, force_slow_decel: bool, accel_clip_bound: bool,
+                             mpc_source, sp_source) -> int:
+  """BluePilot: name the constraint that produced this frame's accel target.
+
+  The final target is clip(min(model, mpc)); the mpc's cruise obstacle already embodies the
+  SP min() over cruise/curve/speed-limit targets, so when 'cruise' binds the SP source names
+  the true limiter."""
+  if should_stop:
+    return PrimaryLimiter.stopped
+  if force_slow_decel:
+    return PrimaryLimiter.forceDecel
+  if accel_clip_bound:
+    return PrimaryLimiter.accelClip
+  if mpc_source == StockPlanSource.e2e:
+    return PrimaryLimiter.model
+  if mpc_source in (StockPlanSource.lead0, StockPlanSource.lead1, StockPlanSource.lead2):
+    return PrimaryLimiter.lead
+  return _SP_SOURCE_TO_LIMITER.get(sp_source, PrimaryLimiter.cruise)
 
 
 class LongitudinalPlannerSP:
@@ -31,6 +61,7 @@ class LongitudinalPlannerSP:
     self.sla = SpeedLimitAssist(CP, CP_SP)
     self.generation = int(model_bundle.generation) if (model_bundle := get_active_bundle()) else None
     self.source = LongitudinalPlanSource.cruise
+    self.primary_limiter = PrimaryLimiter.none
     self.e2e_alerts_helper = E2EAlertsHelper()
 
     self.output_v_target = 0.
@@ -87,6 +118,7 @@ class LongitudinalPlannerSP:
     longitudinalPlanSP.longitudinalPlanSource = self.source
     longitudinalPlanSP.vTarget = float(self.output_v_target)
     longitudinalPlanSP.aTarget = float(self.output_a_target)
+    longitudinalPlanSP.primaryLimiter = self.primary_limiter
     longitudinalPlanSP.events = self.events_sp.to_msg()
 
     # Dynamic Experimental Control
