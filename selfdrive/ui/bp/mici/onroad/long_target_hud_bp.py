@@ -1,23 +1,32 @@
 """BluePilot MICI: longitudinal target debug HUD.
 
 Compact two-line readout above the steering-wheel HUD element:
-  line 1: the plan's target speed (display units) + a tag naming the primary limiter
+  line 1: the plan's target speed (display units) + up to three tags naming the limiters
+          that contributed over the last few seconds, biggest contributor first
   line 2: planned accel (longitudinalPlan.aTarget, pre-PID) -> applied accel
           (carControl.actuators.accel, post Ford set-speed clamp and PID)
 
-The limiter tag comes from longitudinalPlanSP.primaryLimiter, classified in the planner
-where the accel-clip comparison is observable: CRUISE (cluster set speed), SLA (speed
-limit), CURVE/MAP (smart cruise curve targets), LEAD, MODEL (e2e/blended accel won the
-min), CLIP (comfort/turn/coast accel schedule bound), STOP, FDEC (forced decel).
+Per-frame limiters come from longitudinalPlanSP.primaryLimiter (classified in the planner
+where the accel-clip comparison is observable). A rolling LimiterWindow aggregates them so
+a quick braking event stays readable after the fact, ranked by contribution (dwell time
+weighted by braking demand). The speed limit tag is pinned to the end of the list — it is
+the nominal limiter, so transient culprits (lead flicker, curve, model stop) surface first.
+
+Tags: CRUISE (cluster set speed), SLA (speed limit), CURVE/MAP (smart cruise curve
+targets), LEAD, MODEL (e2e/blended accel won the min), CLIP (comfort/turn/coast accel
+schedule bound), STOP, FDEC (forced decel).
 
 Toggle: Longitudinal > Longitudinal Target HUD (BPLongitudinalTargetHUD).
 """
+
+import time
 
 import pyray as rl
 
 from cereal import custom
 from openpilot.common.constants import CV
 from openpilot.common.params import Params
+from openpilot.selfdrive.ui.bp.lib.limiter_window import LimiterWindow
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.system.ui.lib.application import gui_app, FontWeight
 from openpilot.system.ui.lib.text_measure import measure_text_cached
@@ -27,6 +36,7 @@ PrimaryLimiter = custom.LongitudinalPlanSP.PrimaryLimiter
 
 PARAM_REFRESH_FRAMES = 60
 V_TARGET_UNSET = 200.0  # m/s; inactive controllers publish V_CRUISE_UNSET (255)
+PLAN_DT = 0.05  # 20 Hz longitudinalPlanSP cadence
 
 # clear of the steering wheel zone: wheel (50px) + bottom margin (14) + powerflow arc (20)
 MARGIN_LEFT = 12
@@ -65,9 +75,9 @@ class MiciLongTargetHud(Widget):
     self._font_semi_bold = gui_app.font(FontWeight.SEMI_BOLD)
     self._font_medium = gui_app.font(FontWeight.MEDIUM)
 
+    self._window = LimiterWindow()
     self._target_speed_str = "--"
-    self._limiter_tag = "--"
-    self._limiter_color = DIM
+    self._tags: list[tuple[str, rl.Color]] = []
     self._accel_str = ""
     self._engaged = False
 
@@ -80,8 +90,9 @@ class MiciLongTargetHud(Widget):
 
     sm = ui_state.sm
     if sm.recv_frame['longitudinalPlanSP'] < ui_state.started_frame:
+      self._window.clear()
       self._target_speed_str = "--"
-      self._limiter_tag, self._limiter_color = LIMITER_STYLE[PrimaryLimiter.none]
+      self._tags = []
       self._accel_str = ""
       return
 
@@ -96,9 +107,15 @@ class MiciLongTargetHud(Widget):
     else:
       self._target_speed_str = "--"
 
-    # .raw: reader-side capnp enums don't hash-match the schema-side keys (see cruise_ext)
-    self._limiter_tag, self._limiter_color = LIMITER_STYLE.get(lp_sp.primaryLimiter.raw,
-                                                               LIMITER_STYLE[PrimaryLimiter.none])
+    now = time.monotonic()
+    if sm.updated['longitudinalPlanSP']:
+      # .raw: reader-side capnp enums don't hash-match the schema-side keys (see cruise_ext)
+      limiter = lp_sp.primaryLimiter.raw
+      if limiter != PrimaryLimiter.none:
+        self._window.add(now, limiter, lp.aTarget, PLAN_DT)
+
+    ranked = self._window.top(now, bottom_limiter=PrimaryLimiter.speedLimitAssist)
+    self._tags = [LIMITER_STYLE.get(limiter, LIMITER_STYLE[PrimaryLimiter.none]) for limiter in ranked]
 
     applied = sm['carControl'].actuators.accel
     self._accel_str = f"a {lp.aTarget:+.2f} → {applied:+.2f}"
@@ -116,7 +133,7 @@ class MiciLongTargetHud(Widget):
 
     color = WHITE if self._engaged else DIM
 
-    # line 1: target speed + unit + limiter tag
+    # line 1: target speed + unit + limiter tags (primary big, contributors smaller/dimmer)
     speed_txt = self._target_speed_str
     speed_w = measure_text_cached(self._font_semi_bold, speed_txt, line1_size).x
     line1_y = base_y - line1_size - line2_size - 4
@@ -126,8 +143,14 @@ class MiciLongTargetHud(Widget):
     rl.draw_text_ex(self._font_medium, unit, rl.Vector2(int(x + speed_w + 5), int(line1_y + line1_size - line2_size - 1)),
                     line2_size, 0, DIM)
 
-    rl.draw_text_ex(self._font_semi_bold, self._limiter_tag,
-                    rl.Vector2(int(x + speed_w + 5 + unit_w + 10), int(line1_y)), line1_size, 0, self._limiter_color)
+    tag_x = x + speed_w + 5 + unit_w + 10
+    tags = self._tags if self._tags else [LIMITER_STYLE[PrimaryLimiter.none]]
+    for i, (tag, tag_color) in enumerate(tags):
+      size = line1_size if i == 0 else line2_size
+      y = line1_y if i == 0 else line1_y + line1_size - line2_size - 1
+      draw_color = tag_color if i == 0 else rl.Color(tag_color.r, tag_color.g, tag_color.b, 170)
+      rl.draw_text_ex(self._font_semi_bold, tag, rl.Vector2(int(tag_x), int(y)), size, 0, draw_color)
+      tag_x += measure_text_cached(self._font_semi_bold, tag, size).x + 9
 
     # line 2: planned -> applied accel
     if self._accel_str:
