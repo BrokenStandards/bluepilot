@@ -143,19 +143,29 @@ BluePilot's conservative alpha-long accel tuning (`longitudinalTuning.kpV = [0.]
    (10 s) instead of latching forever. All three bugs were first demonstrated by tests that
    failed against the old code (8 failures), then fixed and verified.
 2. **Any speed over the limit** (`speed limit assist: any set speed over the limit under pcm
-   long`): `PCM_LONG_REQUIRED_MAX_SET_SPEED` is retired. Consent in `preActive` is a single
-   SET+/SET− press in either direction (or the cluster already matching the limit, e.g. after
-   ICBM parks it there). SLA output requires `is_active` on the pcm path (no more unconfirmed
-   capping), cluster changes only deactivate when attributed to a driver press (with a grace
-   window after the confirm press), and `inactive` is recoverable. One-shot prompts: a
+   long`, hardened by the post-review commit): `PCM_LONG_REQUIRED_MAX_SET_SPEED` is retired.
+   Consent in `preActive` is strictly a fresh SET+/SET− press — a cluster merely equal to the
+   limit is not consent (ICBM parks the cluster at limit+offset, so equality would silently
+   auto-confirm every standard +5 limit step), and press-holds are cleared on `preActive`
+   entry so the engagement press can never be consumed as confirmation. Under pcm long the
+   cluster is *only* a ceiling: cluster changes never deactivate SLA (overrides are the
+   accelerator or turning SLA off), which also makes the prompts safe to follow. During a
+   re-confirm window the car keeps capping at the previously confirmed limit instead of
+   releasing toward the ceiling; losing the limit past the resolver hold exits
+   active/adapting to `pending` (audible) instead of silently uncapping; `speed_limit_changed`
+   compares the held display-unit value so raw 0-flickers cannot re-arm the handshake;
+   `inactive` is recoverable. One-shot prompts (suppressed when ICBM manages the cluster): a
    post-activation tip recommending `PCM_LONG_RECOMMENDED_SET_SPEED` (130 km/h / 80 mph), and
    a raise-set-speed prompt to limit + `AlphaLongIcbmOffset` when the cluster sits below the
    limit. The suggested value is published as
    `longitudinalPlanSP.speedLimit.assist.suggestedSetSpeed`.
-3. **ICBM under alpha long** (`icbm: run under alpha long`): ICBM gets an alpha-long mode
-   (pcmCruiseSpeed stays True) that walks the physical cluster to SLA's confirmed limit plus
-   the configurable `AlphaLongIcbmOffset` margin (default +5, display units, vehicle
-   dependent). The reference is SLA's target — never `LP_SP.vTarget`, which is min()'d with
-   the cluster itself and would ratchet the ceiling down. SCC curve targets are deliberately
-   excluded so transient curve slowdowns do not churn the cluster. Panda safety needed no
+3. **ICBM under alpha long** (`icbm: run under alpha long`, hardened by the post-review
+   commit): ICBM gets an alpha-long mode (pcmCruiseSpeed stays True) that walks the physical
+   cluster to SLA's confirmed limit plus the configurable `AlphaLongIcbmOffset` margin
+   (default +5, display units, vehicle dependent). The reference is SLA's target — never
+   `LP_SP.vTarget`, which is min()'d with the cluster itself and would ratchet the ceiling
+   down. SCC curve targets are deliberately excluded so transient curve slowdowns do not
+   churn the cluster, and a changed target is only adopted after holding steady for 2 s so
+   resolver source flaps cannot stream physical button presses. Stock-mode behavior is
+   bit-identical (mode snapshot per frame, `>=` boundary preserved). Panda safety needed no
    changes: `Steering_Data_FD1` SET+/SET− TX is already allowlisted under `LONG_CONTROL`.

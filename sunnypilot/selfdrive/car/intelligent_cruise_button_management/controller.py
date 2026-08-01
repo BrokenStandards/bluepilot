@@ -19,6 +19,10 @@ ALLOWED_SPEED_THRESHOLD = 1.8  # m/s, ~4 MPH
 HYST_GAP = 0.0  # currently disabled; TODO-SP: might need to be brand-specific
 INACTIVE_TIMER = 0.4
 V_CRUISE_UNSET = 255.  # m/s sentinel published by inactive SLA/SCC controllers
+# BluePilot: how long an alpha-long target must hold steady before ICBM walks the cluster to it.
+# Damps resolver source flaps (e.g. stale OSM vs TSR) that would otherwise stream SET+/SET-
+# presses at the physical PCM continuously.
+ALPHA_LONG_TARGET_DWELL = 2.0  # secs
 
 
 SEND_BUTTONS = {
@@ -57,6 +61,12 @@ class IntelligentCruiseButtonManagement:
     self.alpha_long_mode_allowed = bool(CP.openpilotLongitudinalControl and CP_SP.intelligentCruiseButtonManagementAvailable)
     self.alpha_long_enabled = False
     self.alpha_long_offset = 5  # display units (km/h or mph)
+    # frame-consistent snapshot of alpha_long_active: the params thread flips alpha_long_enabled
+    # asynchronously, and gate/calc/state-machine must agree within one run() frame
+    self._alpha_frame_active = False
+    self._alpha_pending_target = 0
+    self._alpha_pending_frames = 0
+    self._alpha_adopted = False
 
   @property
   def alpha_long_active(self) -> bool:
@@ -79,10 +89,25 @@ class IntelligentCruiseButtonManagement:
     assist = LP_SP.speedLimit.assist
     max_reasonable = 145 if self.is_metric else 90
     if assist.active and 0. < assist.vTarget < V_CRUISE_UNSET:
-      self.v_target = min(round(assist.vTarget * speed_conv) + self.alpha_long_offset, max_reasonable)
+      raw_target = min(round(assist.vTarget * speed_conv) + self.alpha_long_offset, max_reasonable)
+      # dwell: only adopt a changed target once it has held steady, so resolver source flaps
+      # don't stream physical button presses at the PCM
+      if raw_target != self._alpha_pending_target:
+        self._alpha_pending_target = raw_target
+        self._alpha_pending_frames = 0
+      else:
+        self._alpha_pending_frames += 1
+      if self._alpha_pending_frames >= int(ALPHA_LONG_TARGET_DWELL / DT_CTRL):
+        self.v_target = raw_target
+        self._alpha_adopted = True
+      elif not self._alpha_adopted:
+        self.v_target = self.v_cruise_cluster
     else:
       # nothing to manage — leave the cluster where the driver put it
       self.v_target = self.v_cruise_cluster
+      self._alpha_pending_target = 0
+      self._alpha_pending_frames = 0
+      self._alpha_adopted = False
 
   def update_calculations(self, CS: car.CarState, LP_SP: custom.LongitudinalPlanSP) -> None:
     speed_conv = CV.MS_TO_KPH if self.is_metric else CV.MS_TO_MPH
@@ -136,10 +161,14 @@ class IntelligentCruiseButtonManagement:
               MAX_REASONABLE_TARGET = 145 if self.is_metric else 90
               MAX_INITIAL_INCREASE = 5  # Allow small increases from initial speed
 
-              if self.v_cruise_cluster == 0 or self.v_target > MAX_REASONABLE_TARGET:
+              # BluePilot: alpha-long targets are clamped to exactly MAX_REASONABLE_TARGET, so
+              # only strictly-greater blocks there; stock mode keeps the original >= boundary
+              at_max_cap = self.v_target > MAX_REASONABLE_TARGET if self._alpha_frame_active else \
+                           self.v_target >= MAX_REASONABLE_TARGET
+              if self.v_cruise_cluster == 0 or at_max_cap:
                 # Don't increase - stay in preActive or go to holding
                 self.state = State.holding
-              elif not self.alpha_long_active and self.initial_cruise_speed_kph > 0 and \
+              elif not self._alpha_frame_active and self.initial_cruise_speed_kph > 0 and \
                    self.v_target > (self.initial_cruise_speed_kph + MAX_INITIAL_INCREASE):
                 # Don't increase beyond initial cruise speed + small margin
                 # This prevents ICBM from ramping up when cruise is first enabled.
@@ -196,13 +225,18 @@ class IntelligentCruiseButtonManagement:
 
   def run(self, CS: car.CarState, CC: car.CarControl, LP_SP: custom.LongitudinalPlanSP, is_metric: bool) -> None:
     # BluePilot: pcmCruiseSpeed stays True under alpha long (flipping it would change engagement
-    # and v_cruise semantics globally), so the alpha-long mode gets its own gate here.
-    if self.CP_SP.pcmCruiseSpeed and not self.alpha_long_active:
+    # and v_cruise semantics globally), so the alpha-long mode gets its own gate here. Snapshot
+    # the mode once per frame — the params thread flips alpha_long_enabled asynchronously.
+    self._alpha_frame_active = self.alpha_long_active
+
+    if self.CP_SP.pcmCruiseSpeed and not self._alpha_frame_active:
+      self.cruise_button = SendButtonState.none
+      self.state = State.inactive
       return
 
     self.is_metric = is_metric
 
-    if self.alpha_long_active:
+    if self._alpha_frame_active:
       self._update_alpha_long_calculations(CS, LP_SP)
     else:
       self.update_calculations(CS, LP_SP)

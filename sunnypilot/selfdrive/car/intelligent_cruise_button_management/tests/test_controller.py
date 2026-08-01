@@ -9,13 +9,15 @@ from opendbc.car import structs
 from openpilot.common.constants import CV
 from openpilot.common.realtime import DT_CTRL
 from openpilot.sunnypilot.selfdrive.car.intelligent_cruise_button_management.controller import (
-  IntelligentCruiseButtonManagement, INACTIVE_TIMER)
+  IntelligentCruiseButtonManagement, INACTIVE_TIMER, ALPHA_LONG_TARGET_DWELL)
 
 ButtonType = car.CarState.ButtonEvent.Type
 State = custom.IntelligentCruiseButtonManagement.IntelligentCruiseButtonManagementState
 SendButtonState = custom.IntelligentCruiseButtonManagement.SendButtonState
 
 PRE_ACTIVE_FRAMES = int(INACTIVE_TIMER / DT_CTRL) + 2
+DWELL_FRAMES = int(ALPHA_LONG_TARGET_DWELL / DT_CTRL) + 2
+WALK_FRAMES = DWELL_FRAMES + PRE_ACTIVE_FRAMES
 
 
 def make_cs(cluster_kph: float) -> car.CarState:
@@ -76,7 +78,7 @@ class TestAlphaLongIcbm:
   def test_walks_cluster_up_to_limit_plus_margin(self):
     # SLA confirmed a 100 km/h limit; cluster at 80 must walk up toward 100 + 5
     icbm = make_icbm()
-    drive(icbm, make_cs(80), make_cc(), make_lp(True, 100), PRE_ACTIVE_FRAMES)
+    drive(icbm, make_cs(80), make_cc(), make_lp(True, 100), WALK_FRAMES)
     assert icbm.v_target == 105
     assert icbm.state == State.increasing
     assert icbm.cruise_button == SendButtonState.increase
@@ -84,14 +86,14 @@ class TestAlphaLongIcbm:
   def test_walks_cluster_down_to_limit_plus_margin(self):
     # limit dropped to 50; cluster at 80 must walk down toward 55
     icbm = make_icbm()
-    drive(icbm, make_cs(80), make_cc(), make_lp(True, 50), PRE_ACTIVE_FRAMES)
+    drive(icbm, make_cs(80), make_cc(), make_lp(True, 50), WALK_FRAMES)
     assert icbm.v_target == 55
     assert icbm.state == State.decreasing
     assert icbm.cruise_button == SendButtonState.decrease
 
   def test_holds_at_limit_plus_margin(self):
     icbm = make_icbm()
-    drive(icbm, make_cs(105), make_cc(), make_lp(True, 100), PRE_ACTIVE_FRAMES)
+    drive(icbm, make_cs(105), make_cc(), make_lp(True, 100), WALK_FRAMES)
     assert icbm.state == State.holding
     assert icbm.cruise_button == SendButtonState.none
 
@@ -106,7 +108,7 @@ class TestAlphaLongIcbm:
   def test_configurable_offset(self):
     icbm = make_icbm()
     icbm.alpha_long_offset = 10
-    drive(icbm, make_cs(80), make_cc(), make_lp(True, 100), PRE_ACTIVE_FRAMES)
+    drive(icbm, make_cs(80), make_cc(), make_lp(True, 100), WALK_FRAMES)
     assert icbm.v_target == 110
 
   def test_engagement_speed_cap_not_applied_in_alpha_long_mode(self):
@@ -114,13 +116,13 @@ class TestAlphaLongIcbm:
     # target is the driver-confirmed limit + margin, so the cap must not block the walk-up
     icbm = make_icbm()
     icbm.initial_cruise_speed_kph = 50
-    drive(icbm, make_cs(80), make_cc(), make_lp(True, 100), PRE_ACTIVE_FRAMES)
+    drive(icbm, make_cs(80), make_cc(), make_lp(True, 100), WALK_FRAMES)
     assert icbm.state == State.increasing
 
   def test_driver_button_press_interrupts(self):
     icbm = make_icbm()
     cs = make_cs(80)
-    drive(icbm, cs, make_cc(), make_lp(True, 100), PRE_ACTIVE_FRAMES)
+    drive(icbm, cs, make_cc(), make_lp(True, 100), WALK_FRAMES)
     assert icbm.state == State.increasing
 
     cs_pressed = make_cs(80)
@@ -133,7 +135,43 @@ class TestAlphaLongIcbm:
 
   def test_disengaged_goes_inactive(self):
     icbm = make_icbm()
-    drive(icbm, make_cs(80), make_cc(), make_lp(True, 100), PRE_ACTIVE_FRAMES)
+    drive(icbm, make_cs(80), make_cc(), make_lp(True, 100), WALK_FRAMES)
     assert icbm.state == State.increasing
     drive(icbm, make_cs(80), make_cc(enabled=False), make_lp(True, 100), 1)
     assert icbm.state == State.inactive
+
+  def test_target_dwell_damps_flapping(self):
+    # a changed target is only adopted once stable for ALPHA_LONG_TARGET_DWELL, so resolver
+    # source flaps do not stream physical button presses at the PCM
+    icbm = make_icbm()
+    drive(icbm, make_cs(80), make_cc(), make_lp(True, 100), WALK_FRAMES)
+    assert icbm.v_target == 105
+
+    # alternate targets faster than the dwell: the adopted target must not budge
+    for _ in range(10):
+      drive(icbm, make_cs(80), make_cc(), make_lp(True, 90), DWELL_FRAMES // 4)
+      drive(icbm, make_cs(80), make_cc(), make_lp(True, 100), DWELL_FRAMES // 4)
+    assert icbm.v_target == 105
+
+    # a stable new target is adopted after the dwell
+    drive(icbm, make_cs(80), make_cc(), make_lp(True, 90), DWELL_FRAMES)
+    assert icbm.v_target == 95
+
+  def test_before_dwell_holds_cluster(self):
+    icbm = make_icbm()
+    drive(icbm, make_cs(80), make_cc(), make_lp(True, 100), PRE_ACTIVE_FRAMES)
+    # dwell not yet satisfied: no walking, target pinned to the cluster
+    assert icbm.v_target == icbm.v_cruise_cluster
+    assert icbm.state == State.holding
+
+  def test_stock_mode_max_target_boundary_never_walks(self):
+    # stock-mode regression guard: a target of exactly 145 km/h must never emit button presses
+    # (the state legitimately oscillates preActive<->holding, but stays out of increasing)
+    icbm = make_icbm(op_long=False, pcm_cruise_speed=False, alpha_enabled=False)
+    cs = make_cs(140)
+    cs.vEgo = 145 * CV.KPH_TO_MS  # engagement capture makes initial_cruise_speed_kph = 145
+    for _ in range(PRE_ACTIVE_FRAMES):
+      icbm.run(cs, make_cc(), make_lp(True, 150), True)
+      assert icbm.state != State.increasing
+      assert icbm.cruise_button == SendButtonState.none
+    assert icbm.v_target == 145

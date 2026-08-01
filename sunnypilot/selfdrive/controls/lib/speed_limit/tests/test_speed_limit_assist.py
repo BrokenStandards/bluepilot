@@ -60,6 +60,10 @@ class TestSpeedLimitAssist:
     self.events_sp = EventsSP()
     CI = self._setup_platform(self.car_name)
     self.sla = SpeedLimitAssist(CI.CP, CI.CP_SP)
+    # deterministic clock: the 0.5 s button-hold window must not race wall time on loaded
+    # runners. Starts positive — expired holds are stored as 0.
+    self.now = 1000.
+    self.sla._monotonic = lambda: self.now
     self.sla.pre_active_timer = int(PRE_ACTIVE_GUARD_PERIOD[self.sla.pcm_op_long] / DT_MDL)
     # a comfortable ceiling well above every fixture limit (80 mph); no longer a required value
     self.pcm_long_max_set_speed = PCM_LONG_RECOMMENDED_SET_SPEED[self.sla.is_metric]
@@ -107,11 +111,18 @@ class TestSpeedLimitAssist:
     self.sla._distance = 0.
     self.events_sp.clear()
 
-  def initialize_active_state(self, initialize_v_cruise):
+  def initialize_active_state(self, initialize_v_cruise, confirmed_limit=None):
     self.sla.state = SpeedLimitAssistState.active
     self.sla.v_cruise_cluster = initialize_v_cruise
     self.sla.v_cruise_cluster_prev = initialize_v_cruise
     self.sla.prev_v_cruise_cluster_conv = round(initialize_v_cruise * self.speed_conv)
+    if confirmed_limit is not None:
+      # seed the change-tracking state a genuinely confirmed session would have
+      self.sla.speed_limit_prev = confirmed_limit
+      self.sla._speed_limit = confirmed_limit
+      self.sla._speed_limit_final_last = confirmed_limit
+      self.sla.prev_speed_limit_final_last_conv = round(confirmed_limit * self.speed_conv)
+      self.sla._confirmed_limit = confirmed_limit
 
   def test_initial_state(self):
     assert self.sla.state == SpeedLimitAssistState.disabled
@@ -170,12 +181,13 @@ class TestSpeedLimitAssist:
                     SPEED_LIMITS['highway'], True, 0, self.events_sp)
     assert self.sla.state == SpeedLimitAssistState.active
 
-  def test_preactive_to_active_with_cluster_matching_limit(self):
-    # cluster already exactly at the limit (e.g. ICBM parked it there) auto-confirms
+  def test_cluster_matching_limit_is_not_consent(self):
+    # a cluster merely equal to the limit must NOT auto-confirm: alpha-long ICBM parks the
+    # cluster at limit + offset, so equality would silently confirm every +offset limit step
     self.sla.state = SpeedLimitAssistState.preActive
     self.sla.update(True, False, SPEED_LIMITS['city'], 0, SPEED_LIMITS['highway'], SPEED_LIMITS['highway'],
                     SPEED_LIMITS['highway'], True, 0, self.events_sp)
-    assert self.sla.state == SpeedLimitAssistState.active
+    assert self.sla.state == SpeedLimitAssistState.preActive
 
   def test_preactive_no_confirmation_without_button(self):
     # A high cluster alone is no longer consent: without a press, preActive persists
@@ -254,32 +266,21 @@ class TestSpeedLimitAssist:
                     SPEED_LIMITS['highway'], True, 0, self.events_sp)
     assert self.sla.state == SpeedLimitAssistState.active
 
-  def test_driver_cruise_change_deactivates(self):
-    # A cluster change attributed to the driver (recent stalk press) is still an override
-    self.initialize_active_state(SPEED_LIMITS['highway'])
-    self.sla.speed_limit_prev = SPEED_LIMITS['freeway']
-    self.sla._speed_limit = SPEED_LIMITS['freeway']
-
-    self.press_cruise_button()
-    different_cruise = SPEED_LIMITS['highway'] + 5
-    self.sla.update(True, False, SPEED_LIMITS['city'], 0, different_cruise, SPEED_LIMITS['freeway'],
-                    SPEED_LIMITS['freeway'], True, 0, self.events_sp)
-    assert self.sla.state == SpeedLimitAssistState.inactive
-
-  def test_icbm_cruise_change_stays_active(self):
-    # A cluster change with no driver press (e.g. ICBM walking the cluster) must not deactivate
-    self.initialize_active_state(SPEED_LIMITS['highway'])
-    self.sla.speed_limit_prev = SPEED_LIMITS['highway']
-    self.sla._speed_limit = SPEED_LIMITS['highway']
-
-    different_cruise = SPEED_LIMITS['highway'] + 5
-    self.sla.update(True, False, SPEED_LIMITS['city'], 0, different_cruise, SPEED_LIMITS['highway'],
-                    SPEED_LIMITS['highway'], True, 0, self.events_sp)
-    assert self.sla.state in ACTIVE_STATES
+  def test_cluster_change_never_deactivates_pcm_long(self):
+    # Under pcm long the cluster is only a ceiling: raising it (as the prompts instruct) or
+    # lowering it (the planner min() then caps the car) must never deactivate SLA — even right
+    # after a driver stalk press
+    for different_cruise in (SPEED_LIMITS['highway'] + 5, SPEED_LIMITS['highway'] - 5):
+      self.reset_state()
+      self.initialize_active_state(SPEED_LIMITS['highway'], confirmed_limit=SPEED_LIMITS['city'])
+      self.press_cruise_button()
+      self.sla.update(True, False, SPEED_LIMITS['city'], 0, different_cruise, SPEED_LIMITS['city'],
+                      SPEED_LIMITS['city'], True, 0, self.events_sp)
+      assert self.sla.state in ACTIVE_STATES
 
   def test_confirm_press_cluster_movement_does_not_deactivate(self):
-    # The confirm press itself nudges the physical cluster a beat later; the grace window
-    # must keep that from being read as a driver override
+    # The confirm press itself nudges the physical cluster a beat later; that movement must not
+    # be read as an override
     self.sla.state = SpeedLimitAssistState.preActive
     self.press_cruise_button()
     cluster = self.pcm_long_max_set_speed
@@ -291,6 +292,73 @@ class TestSpeedLimitAssist:
     self.sla.update(True, False, SPEED_LIMITS['city'], 0, cluster - 1 * CV.MPH_TO_MS, SPEED_LIMITS['highway'],
                     SPEED_LIMITS['highway'], True, 0, self.events_sp)
     assert self.sla.state in ACTIVE_STATES
+
+  def test_reconfirm_window_keeps_previous_cap(self):
+    # A new below-CST limit re-arms the handshake, but the cap must hold at the previously
+    # confirmed limit during the window — never release toward the (high) cluster ceiling
+    self.initialize_active_state(self.pcm_long_max_set_speed, confirmed_limit=SPEED_LIMITS['highway'])
+
+    self.sla.update(True, False, SPEED_LIMITS['highway'], 0, self.pcm_long_max_set_speed,
+                    SPEED_LIMITS['residential'], SPEED_LIMITS['residential'], True, 0, self.events_sp)
+    assert self.sla.state == SpeedLimitAssistState.preActive
+    assert self.sla.output_v_target == SPEED_LIMITS['highway']
+
+    # consent applies the new limit
+    self.press_cruise_button()
+    self.sla.update(True, False, SPEED_LIMITS['highway'], 0, self.pcm_long_max_set_speed,
+                    SPEED_LIMITS['residential'], SPEED_LIMITS['residential'], True, 0, self.events_sp)
+    assert self.sla.state in ACTIVE_STATES
+    assert self.sla.output_v_target == SPEED_LIMITS['residential']
+
+  def test_reconfirm_timeout_releases_cap(self):
+    self.initialize_active_state(self.pcm_long_max_set_speed, confirmed_limit=SPEED_LIMITS['highway'])
+    for _ in range(int(PRE_ACTIVE_GUARD_PERIOD[self.sla.pcm_op_long] / DT_MDL) + 2):
+      self.sla.update(True, False, SPEED_LIMITS['highway'], 0, self.pcm_long_max_set_speed,
+                      SPEED_LIMITS['residential'], SPEED_LIMITS['residential'], True, 0, self.events_sp)
+    assert self.sla.state == SpeedLimitAssistState.inactive
+    assert self.sla.output_v_target == V_CRUISE_UNSET
+
+  def test_active_limit_loss_goes_pending(self):
+    # coverage gap outlasting the resolver hold: the cap must release via pending (audible),
+    # never silently while still reporting active
+    self.initialize_active_state(self.pcm_long_max_set_speed, confirmed_limit=SPEED_LIMITS['highway'])
+    self.sla.update(True, False, SPEED_LIMITS['highway'], 0, self.pcm_long_max_set_speed, 0, 0, False, 0, self.events_sp)
+    assert self.sla.state == SpeedLimitAssistState.pending
+    assert not self.sla.is_active
+    assert self.sla.output_v_target == V_CRUISE_UNSET
+
+  def test_adapting_limit_loss_goes_pending(self):
+    self.initialize_active_state(self.pcm_long_max_set_speed, confirmed_limit=SPEED_LIMITS['highway'])
+    self.sla.state = SpeedLimitAssistState.adapting
+    self.sla.update(True, False, SPEED_LIMITS['freeway'], 0, self.pcm_long_max_set_speed, 0, 0, False, 0, self.events_sp)
+    assert self.sla.state == SpeedLimitAssistState.pending
+
+  def test_raw_limit_flicker_does_not_disturb_active(self):
+    # one-frame raw dropout bridged by the resolver hold (final_last unchanged): SLA must keep
+    # capping at the held limit instead of re-arming the handshake
+    self.initialize_active_state(self.pcm_long_max_set_speed, confirmed_limit=SPEED_LIMITS['city'])
+    self.sla.update(True, False, SPEED_LIMITS['city'], 0, self.pcm_long_max_set_speed, 0,
+                    SPEED_LIMITS['city'], True, 0, self.events_sp)
+    assert self.sla.state in ACTIVE_STATES
+    assert self.sla.output_v_target == SPEED_LIMITS['city']
+
+  def test_engagement_press_is_not_consent(self):
+    # the SET press that engages cruise arms a 0.5 s hold; entering preActive clears it, so
+    # SLA must wait for a separate confirm press instead of instantly self-confirming
+    self.press_cruise_button()  # engagement press
+    for _ in range(int(2. / DT_MDL)):
+      self.sla.update(True, False, SPEED_LIMITS['city'], 0, self.pcm_long_max_set_speed, SPEED_LIMITS['city'],
+                      SPEED_LIMITS['city'], True, 0, self.events_sp)
+    assert self.sla.state == SpeedLimitAssistState.preActive
+
+  def test_button_hold_expires(self):
+    # a press only counts within CRUISE_BUTTON_CONFIRM_HOLD of its release
+    self.sla.state = SpeedLimitAssistState.preActive
+    self.press_cruise_button()
+    self.now += 0.6
+    self.sla.update(True, False, SPEED_LIMITS['city'], 0, self.pcm_long_max_set_speed, SPEED_LIMITS['highway'],
+                    SPEED_LIMITS['highway'], True, 0, self.events_sp)
+    assert self.sla.state == SpeedLimitAssistState.preActive
 
   def test_inactive_recovers_on_new_limit(self):
     # inactive is no longer a dead end: a new limit re-arms the confirm handshake
@@ -306,9 +374,7 @@ class TestSpeedLimitAssist:
   def test_raise_set_speed_prompt_once_per_episode(self):
     # cluster below the limit: prompt exactly once until the cluster recovers above the limit
     cluster = 30 * CV.MPH_TO_MS  # below the 35 mph city limit
-    self.initialize_active_state(cluster)
-    self.sla.speed_limit_prev = SPEED_LIMITS['city']
-    self.sla._speed_limit = SPEED_LIMITS['city']
+    self.initialize_active_state(cluster, confirmed_limit=SPEED_LIMITS['city'])
 
     self.events_sp.clear()
     self.sla.update(True, False, SPEED_LIMITS['city'], 0, cluster, SPEED_LIMITS['city'],
@@ -368,8 +434,8 @@ class TestSpeedLimitAssist:
       assert self.sla.output_v_target == V_CRUISE_UNSET or self.sla.output_v_target > 0
 
   def test_stale_data_handling(self):
-    self.initialize_active_state(self.pcm_long_max_set_speed)
     old_speed_limit = SPEED_LIMITS['city']
+    self.initialize_active_state(self.pcm_long_max_set_speed, confirmed_limit=old_speed_limit)
 
     self.sla.update(True, False, SPEED_LIMITS['city'], 0, self.pcm_long_max_set_speed, 0, old_speed_limit, True, 0, self.events_sp)
     assert self.sla.state in ACTIVE_STATES
