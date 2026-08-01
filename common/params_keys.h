@@ -162,6 +162,9 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"HasAcceptedTermsSP", {PERSISTENT, STRING, "0"}},
     {"HideVEgoUI", {PERSISTENT | BACKUP, BOOL, "0"}},
     {"IntelligentCruiseButtonManagement", {PERSISTENT | BACKUP , BOOL}},
+    // BluePilot: cluster set-speed margin above the desired speed when ICBM runs under alpha long,
+    // in display units (km/h or mph). Vehicle dependent: covers the PCM's near-set-speed accel gate.
+    {"AlphaLongIcbmOffset", {PERSISTENT | BACKUP, INT, "5"}},
     {"InteractivityTimeout", {PERSISTENT | BACKUP, INT, "0"}},
     {"IsDevelopmentBranch", {CLEAR_ON_MANAGER_START, BOOL}},
     {"IsReleaseSpBranch", {CLEAR_ON_MANAGER_START, BOOL}},

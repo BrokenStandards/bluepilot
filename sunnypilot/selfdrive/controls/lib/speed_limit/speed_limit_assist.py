@@ -14,7 +14,7 @@ from openpilot.selfdrive.controls.lib.drive_helpers import CONTROL_N
 from openpilot.selfdrive.modeld.constants import ModelConstants
 from openpilot.sunnypilot import PARAMS_UPDATE_PERIOD
 from openpilot.sunnypilot.selfdrive.selfdrived.events import EventsSP
-from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit import PCM_LONG_REQUIRED_MAX_SET_SPEED, CONFIRM_SPEED_THRESHOLD
+from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit import PCM_LONG_RECOMMENDED_SET_SPEED, CONFIRM_SPEED_THRESHOLD
 from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit.common import Mode
 from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit.helpers import compare_cluster_target, set_speed_limit_assist_availability
 
@@ -43,6 +43,14 @@ V_CRUISE_UNSET = 255.
 CRUISE_BUTTONS_PLUS = (ButtonType.accelCruise, ButtonType.resumeCruise)
 CRUISE_BUTTONS_MINUS = (ButtonType.decelCruise, ButtonType.setCruise)
 CRUISE_BUTTON_CONFIRM_HOLD = 0.5  # secs.
+
+# BluePilot: pcm-long consent handshake tuning.
+# A confirm press physically moves the cluster set speed too (it is the same stalk), so cluster
+# changes shortly after a driver press are attributed to the driver, and changes right after a
+# confirm are ignored entirely instead of being read as an override.
+DRIVER_BUTTON_ATTRIB_WINDOW = 1.0  # secs. Cluster change within this after a driver press = driver-initiated.
+CONFIRM_GRACE_PERIOD = 1.5  # secs. Ignore cluster changes this long after a confirm press.
+SET_SPEED_HINT_DELAY = 1.5  # secs. Delay after activation before the one-shot ceiling hint.
 
 
 class SpeedLimitAssist:
@@ -92,6 +100,15 @@ class SpeedLimitAssist:
     self._minus_hold = 0.
     self._last_carstate_ts = 0.
 
+    # BluePilot: pcm-long "any speed over the limit" handshake state
+    self._last_driver_button_ts = 0.
+    self._confirm_grace_until = 0.
+    self._set_speed_hint_shown = False
+    self._set_speed_hint_frames = -1
+    self._raise_set_speed_prompted = False
+    self.alpha_long_offset = int(self.params.get("AlphaLongIcbmOffset", return_default=True))
+    self.suggested_set_speed_conv = 0
+
     # BluePilot: last speed limit (converted/rounded) we notified the driver about while active.
     # Prevents re-alerting when map data flickers between "no limit" and the same limit, or when
     # the resolved source flaps between car and map with sub-rounding float differences.
@@ -117,6 +134,19 @@ class SpeedLimitAssist:
     return bool(self.v_cruise_cluster_conv != self.prev_v_cruise_cluster_conv)
 
   @property
+  def driver_v_cruise_cluster_changed(self) -> bool:
+    # BluePilot: only treat a cluster change as a driver override when the driver recently touched
+    # the stalk. ICBM-injected CAN presses never appear in CS.buttonEvents, so ICBM walking the
+    # cluster does not trip this. Changes inside the confirm grace window are the confirm press
+    # itself still propagating through the PCM and are ignored.
+    if not self.v_cruise_cluster_changed:
+      return False
+    now = time.monotonic()
+    if now <= self._confirm_grace_until:
+      return False
+    return bool(now - self._last_driver_button_ts <= DRIVER_BUTTON_ATTRIB_WINDOW)
+
+  @property
   def target_set_speed_confirmed(self) -> bool:
     return bool(self.v_cruise_cluster_conv == self.target_set_speed_conv)
 
@@ -132,11 +162,10 @@ class SpeedLimitAssist:
     self._last_event_limit_conv = self.speed_limit_final_last_conv
 
   def get_v_target_from_control(self) -> float:
-    if self._has_speed_limit:
-      if self.pcm_op_long and self.is_enabled:
-        return self._speed_limit_final_last
-      if not self.pcm_op_long and self.is_active:
-        return self._speed_limit_final_last
+    # BluePilot: pcm long now also requires is_active (was is_enabled) — no capping to a limit
+    # the driver has not confirmed yet.
+    if self._has_speed_limit and self.is_active:
+      return self._speed_limit_final_last
 
     # Fallback
     return V_CRUISE_UNSET
@@ -150,12 +179,15 @@ class SpeedLimitAssist:
       self.is_metric = self.params.get_bool("IsMetric")
       set_speed_limit_assist_availability(self.CP, self.CP_SP, self.params)
       self.enabled = self.params.get("SpeedLimitMode", return_default=True) == Mode.assist
+      self.alpha_long_offset = int(self.params.get("AlphaLongIcbmOffset", return_default=True))
 
   def update_car_state(self, CS: car.CarState) -> None:
     now = time.monotonic()
     self._last_carstate_ts = now
 
     for b in CS.buttonEvents:
+      if b.type in CRUISE_BUTTONS_PLUS or b.type in CRUISE_BUTTONS_MINUS:
+        self._last_driver_button_ts = now
       if not b.pressed:
         if b.type in CRUISE_BUTTONS_PLUS:
           self._plus_hold = max(self._plus_hold, now + CRUISE_BUTTON_CONFIRM_HOLD)
@@ -188,12 +220,16 @@ class SpeedLimitAssist:
     self.speed_limit_final_last_conv = round(self._speed_limit_final_last * speed_conv)
     self.v_cruise_cluster_conv = round(self.v_cruise_cluster * speed_conv)
 
-    cst_low, cst_high = PCM_LONG_REQUIRED_MAX_SET_SPEED[self.is_metric]
-    pcm_long_required_max = cst_low if self._has_speed_limit and self.speed_limit_final_last_conv < CONFIRM_SPEED_THRESHOLD[self.is_metric] else \
-                            cst_high
-    pcm_long_required_max_set_speed_conv = round(pcm_long_required_max * speed_conv)
+    # BluePilot: the target is the limit itself on both paths. Under pcm long the cluster is only
+    # a ceiling — consent comes from a stalk press, not from dialing the cluster to 120/130.
+    self.target_set_speed_conv = self.speed_limit_final_last_conv
 
-    self.target_set_speed_conv = pcm_long_required_max_set_speed_conv if self.pcm_op_long else self.speed_limit_final_last_conv
+    # Suggested cluster set speed while SLA drives to the limit: limit + margin, so the PCM's
+    # near-set-speed accel gate never binds at the limit. 0 when there is nothing to suggest.
+    if self.pcm_op_long and self._has_speed_limit and self.speed_limit_final_last_conv > 0:
+      self.suggested_set_speed_conv = self.speed_limit_final_last_conv + self.alpha_long_offset
+    else:
+      self.suggested_set_speed_conv = 0
 
   @property
   def apply_confirm_speed_threshold(self) -> bool:
@@ -238,6 +274,20 @@ class SpeedLimitAssist:
 
     return self._get_button_release(req_plus, req_minus)
 
+  def _pcm_long_consent(self) -> bool:
+    # BluePilot: same press-again-to-confirm handshake the non-pcm/ICBM path uses, but
+    # direction-agnostic — the cluster stays where the driver set it (any speed over the limit)
+    # and only serves as a ceiling, so either SET+ or SET- signals consent. A cluster that
+    # already matches the limit exactly (e.g. parked there by ICBM) also counts.
+    if self.target_set_speed_confirmed:
+      return True
+
+    if self._get_button_release(True, True):
+      self._confirm_grace_until = time.monotonic() + CONFIRM_GRACE_PERIOD
+      return True
+
+    return False
+
   def update_state_machine_pcm_op_long(self):
     self.long_engaged_timer = max(0, self.long_engaged_timer - 1)
     self.pre_active_timer = max(0, self.pre_active_timer - 1)
@@ -249,8 +299,11 @@ class SpeedLimitAssist:
 
       else:
         # ACTIVE
+        # BluePilot: a cluster change no longer deactivates by itself — any set speed over the
+        # limit is a valid ceiling, and ICBM may be walking the cluster on our behalf. Only a
+        # driver-attributed press is an override, matching the non-pcm behavior.
         if self.state == SpeedLimitAssistState.active:
-          if self.v_cruise_cluster_changed:
+          if self.driver_v_cruise_cluster_changed:
             self.state = SpeedLimitAssistState.inactive
           elif self.speed_limit_changed and self.apply_confirm_speed_threshold:
             self.state = SpeedLimitAssistState.preActive
@@ -260,7 +313,7 @@ class SpeedLimitAssist:
 
         # ADAPTING
         elif self.state == SpeedLimitAssistState.adapting:
-          if self.v_cruise_cluster_changed:
+          if self.driver_v_cruise_cluster_changed:
             self.state = SpeedLimitAssistState.inactive
           elif self.speed_limit_changed and self.apply_confirm_speed_threshold:
             self.state = SpeedLimitAssistState.preActive
@@ -270,34 +323,30 @@ class SpeedLimitAssist:
 
         # PENDING
         elif self.state == SpeedLimitAssistState.pending:
-          if self.target_set_speed_confirmed:
-            self._update_confirmed_state()
-          elif self.speed_limit_changed:
+          if self.speed_limit_changed:
             self.state = SpeedLimitAssistState.preActive
             self.pre_active_timer = int(PRE_ACTIVE_GUARD_PERIOD[self.pcm_op_long] / DT_MDL)
 
         # PRE_ACTIVE
+        # BluePilot: consent is a single SET+/SET- press (or the cluster already matching the
+        # limit, e.g. after ICBM walked it there) — the old exact 120/130 km/h cluster match had
+        # no hardware basis and forced constant toggling between two set speeds.
         elif self.state == SpeedLimitAssistState.preActive:
-          # BluePilot: For PCM cars using ICBM, check target_set_speed_confirmed directly
-          # ICBM adjusts cluster via CAN, so button events won't be in CS.buttonEvents
-          # We need to check if cluster matches target after ICBM has adjusted it
-          if self.CP_SP.intelligentCruiseButtonManagementAvailable:
-            # BluePilot: For ICBM vehicles, rely on target_set_speed_confirmed check instead of button detection
-            # ICBM sends button presses via CAN directly, not through CS.buttonEvents
-            if self.target_set_speed_confirmed:
-              self._update_confirmed_state()
-            elif self.pre_active_timer <= 0:
-              # Timeout - session ended
-              self.state = SpeedLimitAssistState.inactive
-          elif self.target_set_speed_confirmed:
+          if not self._has_speed_limit:
+            self.state = SpeedLimitAssistState.pending
+          elif self._pcm_long_consent():
             self._update_confirmed_state()
           elif self.pre_active_timer <= 0:
             # Timeout - session ended
             self.state = SpeedLimitAssistState.inactive
 
         # INACTIVE
+        # BluePilot: recoverable (was a dead end until re-engagement) — a new limit re-arms the
+        # confirm handshake, mirroring the non-pcm state machine.
         elif self.state == SpeedLimitAssistState.inactive:
-          pass
+          if self.speed_limit_changed:
+            self.state = SpeedLimitAssistState.preActive
+            self.pre_active_timer = int(PRE_ACTIVE_GUARD_PERIOD[self.pcm_op_long] / DT_MDL)
 
     # DISABLED
     elif self.state == SpeedLimitAssistState.disabled:
@@ -307,9 +356,7 @@ class SpeedLimitAssist:
           self.long_engaged_timer = int(DISABLED_GUARD_PERIOD / DT_MDL)
 
         elif self.long_engaged_timer <= 0:
-          if self.target_set_speed_confirmed:
-            self._update_confirmed_state()
-          elif self._has_speed_limit:
+          if self._has_speed_limit:
             self.state = SpeedLimitAssistState.preActive
             self.pre_active_timer = int(PRE_ACTIVE_GUARD_PERIOD[self.pcm_op_long] / DT_MDL)
           else:
@@ -376,12 +423,48 @@ class SpeedLimitAssist:
 
     return enabled, active
 
+  def _update_pcm_long_prompts(self, events_sp: EventsSP) -> None:
+    # BluePilot: one-shot, non-nagging prompts for the pcm-long "cluster is only a ceiling" flow.
+    if not self.is_active:
+      if self.state == SpeedLimitAssistState.disabled:
+        # once per engagement for the ceiling hint; below-limit prompt re-arms with activation
+        self._set_speed_hint_shown = False
+      self._set_speed_hint_frames = -1
+      self._raise_set_speed_prompted = False
+      return
+
+    speed_conv = CV.MS_TO_KPH if self.is_metric else CV.MS_TO_MPH
+    recommended_conv = round(PCM_LONG_RECOMMENDED_SET_SPEED[self.is_metric] * speed_conv)
+
+    # Suggest a high ceiling once per engagement, shortly after activation so it does not fight
+    # the activation chime. If the driver ignores it, never repeat it.
+    if self._state_prev not in ACTIVE_STATES and not self._set_speed_hint_shown \
+       and self.v_cruise_cluster_conv < recommended_conv:
+      self._set_speed_hint_frames = int(SET_SPEED_HINT_DELAY / DT_MDL)
+    if self._set_speed_hint_frames > 0:
+      self._set_speed_hint_frames -= 1
+      if self._set_speed_hint_frames == 0 and not self._set_speed_hint_shown:
+        events_sp.add(EventNameSP.speedLimitSetSpeedHint)
+        self._set_speed_hint_shown = True
+
+    # The cluster is a hard ceiling: below the limit, SLA cannot reach it. Prompt once per
+    # below-limit episode to raise the set speed to limit + margin.
+    cluster_below_target = self._has_speed_limit and 0 < self.v_cruise_cluster_conv < self.speed_limit_final_last_conv
+    if cluster_below_target and not self._raise_set_speed_prompted:
+      events_sp.add(EventNameSP.speedLimitRaiseSetSpeed)
+      self._raise_set_speed_prompted = True
+    elif not cluster_below_target:
+      self._raise_set_speed_prompted = False
+
   def update_events(self, events_sp: EventsSP) -> None:
     if self.state == SpeedLimitAssistState.preActive:
       events_sp.add(EventNameSP.speedLimitPreActive)
 
     if self.state == SpeedLimitAssistState.pending and self._state_prev != SpeedLimitAssistState.pending:
       events_sp.add(EventNameSP.speedLimitPending)
+
+    if self.pcm_op_long:
+      self._update_pcm_long_prompts(events_sp)
 
     if self.is_active:
       if self._state_prev not in ACTIVE_STATES:

@@ -132,6 +132,7 @@ class LongitudinalPlannerSP:
     assist.active = self.sla.is_active
     assist.vTarget = float(self.sla.output_v_target)
     assist.aTarget = float(self.sla.output_a_target)
+    assist.suggestedSetSpeed = int(self.sla.suggested_set_speed_conv)
 
     # E2E Alerts
     e2eAlerts = longitudinalPlanSP.e2eAlerts

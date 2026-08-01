@@ -267,6 +267,7 @@ struct LongitudinalPlanSP @0xf35cc4560bbf6ec2 {
       active @2 :Bool;
       vTarget @3 :Float32;
       aTarget @4 :Float32;
+      suggestedSetSpeed @5 :Int16;  # display units (km/h or mph); 0 = no suggestion
     }
 
     enum Source {
@@ -342,6 +343,8 @@ struct OnroadEventSP @0xda96579883444c35 {
     speedLimitChanged @21;
     speedLimitPending @22;
     e2eChime @23;
+    speedLimitSetSpeedHint @24;
+    speedLimitRaiseSetSpeed @25;
   }
 }
 

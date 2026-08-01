@@ -9,7 +9,7 @@ from cereal import log, car, custom
 from openpilot.common.constants import CV
 from openpilot.sunnypilot.selfdrive.selfdrived.events_base import EventsBase, Priority, ET, Alert, \
   NoEntryAlert, ImmediateDisableAlert, EngagementAlert, NormalPermanentAlert, AlertCallbackType, wrong_car_mode_alert
-from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit import PCM_LONG_REQUIRED_MAX_SET_SPEED, CONFIRM_SPEED_THRESHOLD
+from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit import PCM_LONG_RECOMMENDED_SET_SPEED
 from openpilot.system.hardware import HARDWARE
 
 AlertSize = log.SelfdriveState.AlertSize
@@ -49,13 +49,10 @@ def speed_limit_pre_active_alert(CP: car.CarParams, CS: car.CarState, sm: messag
   alert_size = AlertSize.small
 
   if CP.openpilotLongitudinalControl and CP.pcmCruise:
-    # PCM long
-    cst_low, cst_high = PCM_LONG_REQUIRED_MAX_SET_SPEED[metric]
-    pcm_long_required_max = cst_low if speed_limit_final_last_conv < CONFIRM_SPEED_THRESHOLD[metric] else cst_high
-    pcm_long_required_max_set_speed_conv = round(pcm_long_required_max * speed_conv)
+    # PCM long. BluePilot: consent is a single stalk press — the cluster no longer has to be
+    # dialed to an exact 120/130 km/h value.
     speed_unit = "km/h" if metric else "mph"
-
-    alert_1_str = f"Speed Limit Assist: set to {pcm_long_required_max_set_speed_conv} {speed_unit} to engage"
+    alert_1_str = f"Speed Limit Assist: press +/- to confirm {speed_limit_final_last_conv} {speed_unit}"
   else:
     if IS_MICI:
       if set_speed_conv < speed_limit_final_last_conv:
@@ -70,6 +67,32 @@ def speed_limit_pre_active_alert(CP: car.CarParams, CS: car.CarState, sm: messag
     "",
     AlertStatus.normal, alert_size,
     Priority.LOW, VisualAlert.none, AudibleAlertSP.promptSingleLow, .1)
+
+
+def speed_limit_set_speed_hint_alert(CP: car.CarParams, CS: car.CarState, sm: messaging.SubMaster,
+                                     metric: bool, soft_disable_time: int, personality) -> Alert:
+  # BluePilot: one-shot tip after SLA activates with a low ceiling. Purely advisory.
+  speed_conv = CV.MS_TO_KPH if metric else CV.MS_TO_MPH
+  recommended_conv = round(PCM_LONG_RECOMMENDED_SET_SPEED[metric] * speed_conv)
+  speed_unit = "km/h" if metric else "mph"
+  return Alert(
+    f"Tip: a set speed of {recommended_conv} {speed_unit} gives Speed Limit Assist full range",
+    "",
+    AlertStatus.normal, AlertSize.small,
+    Priority.LOW, VisualAlert.none, AudibleAlert.none, 4.)
+
+
+def speed_limit_raise_set_speed_alert(CP: car.CarParams, CS: car.CarState, sm: messaging.SubMaster,
+                                      metric: bool, soft_disable_time: int, personality) -> Alert:
+  # BluePilot: the cluster set speed is a hard ceiling under pcm long — below the limit, SLA
+  # cannot reach it. Suggest limit + margin (published by SLA) so the PCM accel gate stays clear.
+  suggested = sm['longitudinalPlanSP'].speedLimit.assist.suggestedSetSpeed
+  speed_unit = "km/h" if metric else "mph"
+  return Alert(
+    f"Raise set speed to {suggested} {speed_unit} to reach the speed limit",
+    "",
+    AlertStatus.normal, AlertSize.small,
+    Priority.LOW, VisualAlert.none, AudibleAlert.none, 4.)
 
 
 class EventsSP(EventsBase):
@@ -237,6 +260,15 @@ EVENTS_SP: dict[int, dict[str, Alert | AlertCallbackType]] = {
       "",
       AlertStatus.normal, AlertSize.none,
       Priority.LOW, VisualAlert.none, AudibleAlertSP.promptSingleHigh, 5.),
+  },
+
+  # BluePilot: one-shot pcm-long ceiling prompts (emitted at most once per episode by SLA)
+  EventNameSP.speedLimitSetSpeedHint: {
+    ET.WARNING: speed_limit_set_speed_hint_alert,
+  },
+
+  EventNameSP.speedLimitRaiseSetSpeed: {
+    ET.WARNING: speed_limit_raise_set_speed_alert,
   },
 
   EventNameSP.e2eChime: {

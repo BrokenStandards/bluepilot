@@ -549,6 +549,14 @@
       "flags": ["PERSISTENT", "BACKUP"],
       "create_default": false,
       "enabled": true
+    },
+    {
+      "name": "AlphaLongIcbmOffset",
+      "default": 5,
+      "type": "int",
+      "flags": ["PERSISTENT", "BACKUP"],
+      "create_default": true,
+      "enabled": true
     }
   ]
 }

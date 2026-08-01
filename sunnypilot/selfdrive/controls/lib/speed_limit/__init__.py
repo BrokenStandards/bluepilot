@@ -11,9 +11,14 @@ LIMIT_MAX_MAP_DATA_AGE = 10.  # s Maximum time to hold to map data, then conside
 LIMIT_LAST_HOLD_TIME = 10.
 
 # Speed Limit Assist constants
-PCM_LONG_REQUIRED_MAX_SET_SPEED = {
-  True: (33.3333, 36.1111),  # km/h, (120, 130)
-  False: (31.2928, 35.7632),  # mph, (70, 80)
+# BluePilot: under pcm long (openpilotLongitudinalControl + pcmCruise, e.g. Ford alpha long) the
+# cluster set speed is only a ceiling — SLA tracks the limit in software. Any set speed at/above
+# the limit works; this is the recommended ceiling so SLA has full range without the PCM's
+# near-set-speed accel gate binding. It replaces the old exact-match 120/130 km/h requirement
+# (PCM_LONG_REQUIRED_MAX_SET_SPEED), which had no hardware basis.
+PCM_LONG_RECOMMENDED_SET_SPEED = {
+  True: 36.1111,   # m/s, 130 km/h
+  False: 35.7632,  # m/s, 80 mph
 }
 
 CONFIRM_SPEED_THRESHOLD = {
