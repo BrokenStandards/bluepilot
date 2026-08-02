@@ -33,6 +33,14 @@ from openpilot.system.ui.lib.text_measure import measure_text_cached
 from openpilot.system.ui.widgets import Widget
 
 PrimaryLimiter = custom.LongitudinalPlanSP.PrimaryLimiter
+BlendedReason = custom.LongitudinalPlanSP.DynamicExperimentalControl.BlendedReason
+
+# suffix on the MODEL tag naming what DEC reacted to (only available with DEC enabled)
+BLEND_REASON_SUFFIX = {
+  BlendedReason.fcw: "·FCW",
+  BlendedReason.slowDown: "·SLOW",
+  BlendedReason.standstill: "·STILL",
+}
 
 PARAM_REFRESH_FRAMES = 60
 V_TARGET_UNSET = 200.0  # m/s; inactive controllers publish V_CRUISE_UNSET (255)
@@ -156,8 +164,20 @@ class MiciLongTargetHud(Widget):
     ranked = self._window.top(now, bottom_limiter=PrimaryLimiter.speedLimitAssist)
     self._tags = [LIMITER_STYLE.get(limiter, LIMITER_STYLE[PrimaryLimiter.none]) for limiter in ranked]
 
+    # DEC publishes WHY the model is currently in charge (trajectory-endpoint slow-down,
+    # standstill hold, FCW) — suffix it onto the MODEL tag while blended is active
+    dec = lp_sp.dec
+    if dec.active:
+      suffix = BLEND_REASON_SUFFIX.get(dec.blendedReason.raw)
+      if suffix is not None:
+        model_tag, model_color = LIMITER_STYLE[PrimaryLimiter.model]
+        self._tags = [(model_tag + suffix, model_color) if tag == model_tag else (tag, c)
+                      for tag, c in self._tags]
+
     applied = sm['carControl'].actuators.accel
     self._accel_str = f"a {lp.aTarget:+.2f} → {applied:+.2f}"
+    if dec.active and dec.blendedReason.raw == BlendedReason.slowDown and dec.urgency > 0.:
+      self._accel_str += f"  u{dec.urgency:.2f}"
 
   def _render(self, rect: rl.Rectangle) -> None:
     if not self._enabled:

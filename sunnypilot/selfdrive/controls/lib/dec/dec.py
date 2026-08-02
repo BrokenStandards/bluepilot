@@ -6,13 +6,15 @@ See the LICENSE.md file in the root directory for more details.
 """
 # Version = 2025-6-30
 
-from cereal import messaging
+from cereal import custom, messaging
 from opendbc.car import structs
 from numpy import interp
 from openpilot.common.params import Params
 from openpilot.common.realtime import DT_MDL
 from openpilot.sunnypilot.selfdrive.controls.lib.dec.constants import WMACConstants
 from typing import Literal
+
+BlendedReason = custom.LongitudinalPlanSP.DynamicExperimentalControl.BlendedReason
 
 # d-e2e, from modeldata.h
 TRAJECTORY_SIZE = 33
@@ -179,6 +181,9 @@ class DynamicExperimentalController:
     self._has_standstill = False
     self._mpc_fcw_crash_cnt = 0
     self._standstill_count = 0
+    # BluePilot: why the last blended request was made — published so the UI can explain
+    # model-driven slowdowns. Latched across the mode manager's hysteresis.
+    self._blend_reason = BlendedReason.none
     # debug
     self._endpoint_x = float('inf')
     self._expected_distance = 0.0
@@ -196,6 +201,16 @@ class DynamicExperimentalController:
 
   def active(self) -> bool:
     return self._active
+
+  def blended_reason(self):
+    # BluePilot: only meaningful while blended is actually selected; the latched value from
+    # the last blended request survives the mode manager's hysteresis window
+    if self._mode_manager.get_mode() != 'blended':
+      return BlendedReason.none
+    return self._blend_reason
+
+  def urgency(self) -> float:
+    return float(self._urgency)
 
   def set_mpc_fcw_crash_cnt(self) -> None:
     """Set MPC FCW crash count"""
@@ -307,16 +322,19 @@ class DynamicExperimentalController:
 
     # EMERGENCY: MPC FCW - immediate blended mode
     if self._has_mpc_fcw:
+      self._blend_reason = BlendedReason.fcw
       self._mode_manager.request_mode('blended', confidence=1.0, emergency=True)
       return
 
     # Standstill: use blended
     if self._standstill_count > 3:
+      self._blend_reason = BlendedReason.standstill
       self._mode_manager.request_mode('blended', confidence=0.9)
       return
 
     # Slow down scenarios: emergency for high urgency, normal for lower urgency
     if self._has_slow_down:
+      self._blend_reason = BlendedReason.slowDown
       if self._urgency > 0.7:
         # Emergency: immediate blended mode for high urgency stops
         self._mode_manager.request_mode('blended', confidence=1.0, emergency=True)
@@ -339,6 +357,7 @@ class DynamicExperimentalController:
 
     # EMERGENCY: MPC FCW - immediate blended mode
     if self._has_mpc_fcw:
+      self._blend_reason = BlendedReason.fcw
       self._mode_manager.request_mode('blended', confidence=1.0, emergency=True)
       return
 
@@ -349,6 +368,7 @@ class DynamicExperimentalController:
 
     # Slow down scenarios: emergency for high urgency, normal for lower urgency
     if self._has_slow_down:
+      self._blend_reason = BlendedReason.slowDown
       if self._urgency > 0.7:
         # Emergency: immediate blended mode for high urgency stops
         self._mode_manager.request_mode('blended', confidence=1.0, emergency=True)
@@ -360,6 +380,7 @@ class DynamicExperimentalController:
 
     # Standstill: use blended
     if self._standstill_count > 3:
+      self._blend_reason = BlendedReason.standstill
       self._mode_manager.request_mode('blended', confidence=0.9)
       return
 

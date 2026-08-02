@@ -213,10 +213,21 @@ struct LongitudinalPlanSP @0xf35cc4560bbf6ec2 {
     state @0 :DynamicExperimentalControlState;
     enabled @1 :Bool;
     active @2 :Bool;
+    # BluePilot: why blended (model longitudinal) is currently selected; none while in acc.
+    # This is the model-slowdown explanation DEC already computes but never published.
+    blendedReason @3 :BlendedReason;
+    urgency @4 :Float32;  # slow-down urgency from the trajectory-endpoint detector (0-1)
 
     enum DynamicExperimentalControlState {
       acc @0;
       blended @1;
+    }
+
+    enum BlendedReason {
+      none @0;
+      fcw @1;         # mpc forward collision warning
+      slowDown @2;    # model trajectory ends short of the speed-expected distance (stop/hazard inferred)
+      standstill @3;  # holding at a stop
     }
   }
 
