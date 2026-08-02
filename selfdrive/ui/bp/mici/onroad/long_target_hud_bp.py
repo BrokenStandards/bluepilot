@@ -36,7 +36,11 @@ PrimaryLimiter = custom.LongitudinalPlanSP.PrimaryLimiter
 
 PARAM_REFRESH_FRAMES = 60
 V_TARGET_UNSET = 200.0  # m/s; inactive controllers publish V_CRUISE_UNSET (255)
+V_CRUISE_UNSET_KPH = 255.0
 PLAN_DT = 0.05  # 20 Hz longitudinalPlanSP cadence
+
+# pseudo-limiter for driver braking (UI-side only, outside the capnp enum range)
+BRAKE_LIMITER = 1000
 
 # clear of the steering wheel zone: wheel (50px) + bottom margin (14) + powerflow arc (20)
 MARGIN_LEFT = 12
@@ -49,6 +53,7 @@ BLUE = rl.Color(80, 170, 255, 255)
 ORANGE = rl.Color(255, 160, 40, 255)
 YELLOW = rl.Color(255, 205, 0, 255)
 RED = rl.Color(235, 64, 52, 255)
+MAGENTA = rl.Color(240, 100, 220, 255)
 
 # (tag, color) per limiter — short tags fit the 536px-wide MICI screen
 LIMITER_STYLE = {
@@ -62,6 +67,7 @@ LIMITER_STYLE = {
   PrimaryLimiter.accelClip: ("CLIP", YELLOW),
   PrimaryLimiter.stopped: ("STOP", RED),
   PrimaryLimiter.forceDecel: ("FDEC", RED),
+  BRAKE_LIMITER: ("BRAKE", MAGENTA),
 }
 
 
@@ -81,6 +87,37 @@ class MiciLongTargetHud(Widget):
     self._accel_str = ""
     self._engaged = False
 
+  def _limiter_target_speed_str(self, sm, lp_sp, lp) -> str:
+    """Target speed of the limiter that is binding RIGHT NOW, in display units.
+
+    The SP min() (lp_sp.vTarget) does not reflect lead/model/mpc constraints, so each
+    limiter contributes its own target instead of always echoing the SLA/cruise value."""
+    # .raw: reader-side capnp enums don't hash-match the schema-side keys (see cruise_ext)
+    limiter = lp_sp.primaryLimiter.raw
+    if limiter == PrimaryLimiter.stopped:
+      return "0"
+    if limiter == PrimaryLimiter.speedLimitAssist:
+      v = lp_sp.speedLimit.assist.vTarget
+    elif limiter == PrimaryLimiter.sccVision:
+      v = lp_sp.smartCruiseControl.vision.vTarget
+    elif limiter == PrimaryLimiter.sccMap:
+      v = lp_sp.smartCruiseControl.map.vTarget
+    elif limiter == PrimaryLimiter.lead:
+      lead = sm['radarState'].leadOne
+      v = max(0., sm['carState'].vEgo + lead.vRel) if lead.status else 0.
+    elif limiter == PrimaryLimiter.model:
+      # the model outputs accel, not a set speed; the plan's end-of-horizon speed is the
+      # closest thing to where it is steering the car
+      speeds = lp.speeds
+      v = speeds[len(speeds) - 1] if len(speeds) else 0.
+    else:  # cruise / accelClip / forceDecel
+      v = lp_sp.vTarget
+
+    if not 0. < v < V_TARGET_UNSET:
+      return "--"
+    speed_conv = CV.MS_TO_KPH if ui_state.is_metric else CV.MS_TO_MPH
+    return str(round(v * speed_conv))
+
   def _update_state(self) -> None:
     self._frame += 1
     if self._frame % PARAM_REFRESH_FRAMES == 0:
@@ -98,21 +135,23 @@ class MiciLongTargetHud(Widget):
 
     lp_sp = sm['longitudinalPlanSP']
     lp = sm['longitudinalPlan']
+    cs = sm['carState']
     self._engaged = sm['carControl'].enabled
 
-    v_target = lp_sp.vTarget
-    if 0. < v_target < V_TARGET_UNSET:
-      speed_conv = CV.MS_TO_KPH if ui_state.is_metric else CV.MS_TO_MPH
-      self._target_speed_str = str(round(v_target * speed_conv))
-    else:
-      self._target_speed_str = "--"
+    # target speed only means something while openpilot longitudinal is engaged — before
+    # engagement the plan idles at V_CRUISE_MAX and churns limiters
+    self._target_speed_str = self._limiter_target_speed_str(sm, lp_sp, lp) if self._engaged else "--"
 
     now = time.monotonic()
     if sm.updated['longitudinalPlanSP']:
-      # .raw: reader-side capnp enums don't hash-match the schema-side keys (see cruise_ext)
-      limiter = lp_sp.primaryLimiter.raw
-      if limiter != PrimaryLimiter.none:
-        self._window.add(now, limiter, lp.aTarget, PLAN_DT)
+      if self._engaged:
+        limiter = lp_sp.primaryLimiter.raw
+        if limiter != PrimaryLimiter.none:
+          self._window.add(now, limiter, lp.aTarget, PLAN_DT)
+      # manual braking disengages openpilot long, so it never appears as a plan limiter —
+      # track it as its own cause
+      if cs.brakePressed:
+        self._window.add(now, BRAKE_LIMITER, min(cs.aEgo, 0.), PLAN_DT)
 
     ranked = self._window.top(now, bottom_limiter=PrimaryLimiter.speedLimitAssist)
     self._tags = [LIMITER_STYLE.get(limiter, LIMITER_STYLE[PrimaryLimiter.none]) for limiter in ranked]
@@ -127,8 +166,8 @@ class MiciLongTargetHud(Widget):
     x = rect.x + MARGIN_LEFT
     base_y = rect.y + rect.height - MARGIN_BOTTOM
 
-    line1_size = 24
-    line2_size = 17
+    line1_size = 26
+    line2_size = 22
     unit = "km/h" if ui_state.is_metric else "mph"
 
     color = WHITE if self._engaged else DIM
@@ -154,5 +193,5 @@ class MiciLongTargetHud(Widget):
 
     # line 2: planned -> applied accel
     if self._accel_str:
-      rl.draw_text_ex(self._font_medium, self._accel_str, rl.Vector2(int(x), int(base_y - line2_size)),
-                      line2_size, 0, DIM)
+      rl.draw_text_ex(self._font_semi_bold, self._accel_str, rl.Vector2(int(x), int(base_y - line2_size)),
+                      line2_size, 0, WHITE if self._engaged else DIM)
