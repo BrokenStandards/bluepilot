@@ -127,6 +127,10 @@ class LongitudinalPlannerSP:
     self._frame_sp += 1
     if self._frame_sp % int(PARAMS_UPDATE_PERIOD / DT_MDL) == 0:
       self.model_decel_gate_enabled = self._params_sp.get_bool("BPModelDecelGate")
+      try:
+        self.decel_gate.set_engage_accel(float(self._params_sp.get("BPModelDecelGateAccel", return_default=True)))
+      except (TypeError, ValueError):
+        pass
 
     self.events_sp.clear()
     self.dec.update(sm)

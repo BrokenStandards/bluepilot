@@ -83,3 +83,25 @@ class TestModelDecelGate:
     run(gate, int(RELEASE_TIME / DT) + 1, accel=0.2)
     assert not gate.active
     assert gate.update(-0.5, False, V_CRUISE, V_CRUISE) is True
+
+  def test_adjustable_engage_threshold(self):
+    # sensitive threshold: any slight decel engages (soft-braking models, curves, crests)
+    gate = ModelDecelGate(DT)
+    gate.set_engage_accel(-0.0)
+    assert gate.update(-0.05, False, V_CRUISE, V_CRUISE) is True
+
+    # hard threshold: gentle decel no longer engages
+    gate = ModelDecelGate(DT)
+    gate.set_engage_accel(-2.0)
+    assert not run(gate, 20, accel=-1.0)
+    assert gate.update(-2.5, False, V_CRUISE, V_CRUISE) is True
+    # release band follows the engage threshold
+    assert run(gate, 200, accel=-1.9) is True   # inside hysteresis band: held
+    assert run(gate, int(RELEASE_TIME / DT) + 1, accel=-1.5) is False  # above release: clears
+
+  def test_engage_threshold_clamped(self):
+    gate = ModelDecelGate(DT)
+    gate.set_engage_accel(-99.0)
+    assert gate.engage_accel == -5.0
+    gate.set_engage_accel(1.0)
+    assert gate.engage_accel == 0.0

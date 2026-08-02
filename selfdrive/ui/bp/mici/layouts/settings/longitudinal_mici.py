@@ -3,6 +3,7 @@
 from collections.abc import Callable
 
 from openpilot.selfdrive.ui.bp.mici.widgets.button_bp import BigMultiParamToggleBP, BigParamControlBP
+from openpilot.selfdrive.ui.bp.mici.widgets.floatbutton import BigParamFloatControl
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.system.ui.widgets.scroller import NavScroller
 
@@ -19,8 +20,14 @@ class LongitudinalLayoutMici(NavScroller):
     )
     self.disable_downhill_comp = BigParamControlBP("Disable Downhill Compensation", "disable_downhill_comp_UI")
     self.disable_ford_radar = BigParamControlBP("Disable Ford Radar (Vision-Only Leads)", "disable_ford_radar_UI")
-    self.long_target_hud = BigParamControlBP("Longitudinal Target HUD", "BPLongitudinalTargetHUD")
+    self.long_target_hud = BigParamControlBP("Longitudinal Controller Icons (Speed Sign)", "BPLongitudinalTargetHUD")
     self.model_decel_gate = BigParamControlBP("Model Decel Gate (E2E Brakes, ACC Accelerates)", "BPModelDecelGate")
+    self.model_decel_gate_accel = BigParamFloatControl(
+      "Decel Gate Engage Threshold (m/s²)", "BPModelDecelGateAccel", min=-5.00, max=0.00, step=0.01,
+    )
+    self.limiter_window = BigParamFloatControl(
+      "Controller Icons Window (s)", "BPLimiterWindow", min=0.0, max=5.0, step=0.1,
+    )
 
     self._scroller.add_widgets([
       self.disable_BP_long,
@@ -28,7 +35,9 @@ class LongitudinalLayoutMici(NavScroller):
       self.disable_downhill_comp,
       self.disable_ford_radar,
       self.model_decel_gate,
+      self.model_decel_gate_accel,
       self.long_target_hud,
+      self.limiter_window,
     ])
 
     self._refresh_toggles = (

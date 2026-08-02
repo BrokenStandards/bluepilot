@@ -573,6 +573,22 @@
       "flags": ["PERSISTENT", "BACKUP"],
       "create_default": true,
       "enabled": true
+    },
+    {
+      "name": "BPModelDecelGateAccel",
+      "default": -0.20,
+      "type": "float",
+      "flags": ["PERSISTENT", "BACKUP"],
+      "create_default": true,
+      "enabled": true
+    },
+    {
+      "name": "BPLimiterWindow",
+      "default": 4.0,
+      "type": "float",
+      "flags": ["PERSISTENT", "BACKUP"],
+      "create_default": true,
+      "enabled": true
     }
   ]
 }

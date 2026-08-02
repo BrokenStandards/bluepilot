@@ -21,8 +21,10 @@ the model's 10 s plan-end speed stays collapsed through a genuine stop.
 
 from openpilot.common.realtime import DT_MDL
 
-ENGAGE_ACCEL = -0.2   # m/s^2: model demands real deceleration (outside the ~0.0 plateau noise band)
-RELEASE_ACCEL = -0.05  # m/s^2: hysteresis upper bound for release
+ENGAGE_ACCEL = -0.2   # m/s^2 default: model demands real deceleration (outside the ~0.0 plateau noise band)
+# The release threshold tracks the engage threshold with a fixed hysteresis band so the
+# user-adjustable engage value (0.00 .. -5.00, BPModelDecelGateAccel) keeps a working band.
+RELEASE_HYSTERESIS = 0.15  # m/s^2 (default engage -0.2 -> release -0.05)
 
 # m/s below v_ego for the model's 10 s plan-end speed. The end speed collapses toward 0 well
 # before instantaneous accel dips when approaching a red light — the EARLY engage signal.
@@ -37,14 +39,23 @@ LOW_SPEED = 3.0           # m/s
 
 
 class ModelDecelGate:
-  def __init__(self, dt: float = DT_MDL):
+  def __init__(self, dt: float = DT_MDL, engage_accel: float = ENGAGE_ACCEL):
     self._dt = dt
     self._release_counter = 0
     self.active = False
+    self.engage_accel = engage_accel
+    self.release_accel = engage_accel + RELEASE_HYSTERESIS
+    self.set_engage_accel(engage_accel)
+
+  def set_engage_accel(self, engage_accel: float) -> None:
+    # different models brake with different strength; the threshold is user-adjustable so
+    # gentle model slowdowns (curves, crests, brake lights) can engage on soft-braking models
+    self.engage_accel = min(0.0, max(-5.0, engage_accel))
+    self.release_accel = self.engage_accel + RELEASE_HYSTERESIS
 
   def update(self, e2e_accel: float, e2e_should_stop: bool, model_end_v: float, v_ego: float) -> bool:
     decel_intent = (e2e_should_stop or
-                    e2e_accel < ENGAGE_ACCEL or
+                    e2e_accel < self.engage_accel or
                     model_end_v < v_ego - ENGAGE_END_V_MARGIN)
 
     if decel_intent:
@@ -54,7 +65,7 @@ class ModelDecelGate:
 
     if self.active:
       all_clear = (not e2e_should_stop and
-                   e2e_accel > RELEASE_ACCEL and
+                   e2e_accel > self.release_accel and
                    model_end_v > v_ego - RELEASE_END_V_MARGIN)
       if all_clear:
         self._release_counter += 1
