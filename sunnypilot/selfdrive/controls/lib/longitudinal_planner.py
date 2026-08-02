@@ -8,8 +8,12 @@ See the LICENSE.md file in the root directory for more details.
 from cereal import log, messaging, custom
 from opendbc.car import structs
 from openpilot.common.constants import CV
+from openpilot.common.params import Params
+from openpilot.common.realtime import DT_MDL
 from openpilot.selfdrive.car.cruise import V_CRUISE_MAX
+from openpilot.sunnypilot import PARAMS_UPDATE_PERIOD
 from openpilot.sunnypilot.selfdrive.controls.lib.dec.dec import DynamicExperimentalController
+from openpilot.sunnypilot.selfdrive.controls.lib.model_decel_gate import ModelDecelGate
 from openpilot.sunnypilot.selfdrive.controls.lib.e2e_alerts_helper import E2EAlertsHelper
 from openpilot.sunnypilot.selfdrive.controls.lib.smart_cruise_control.smart_cruise_control import SmartCruiseControl
 from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit.speed_limit_assist import SpeedLimitAssist
@@ -64,11 +68,26 @@ class LongitudinalPlannerSP:
     self.primary_limiter = PrimaryLimiter.none
     self.e2e_alerts_helper = E2EAlertsHelper()
 
+    # BluePilot: per-frame model-decel gate — e2e brakes, MPC accelerates
+    self._params_sp = Params()
+    self._frame_sp = -1
+    self.model_decel_gate_enabled = self._params_sp.get_bool("BPModelDecelGate")
+    self.decel_gate = ModelDecelGate()
+
     self.output_v_target = 0.
     self.output_a_target = 0.
 
   def is_e2e(self, sm: messaging.SubMaster) -> bool:
     experimental_mode = sm['selfdriveState'].experimentalMode
+
+    # BluePilot: with the model-decel gate, arbitration is per-frame in the stock planner
+    # (e2e participates only with decel intent), which supersedes DEC's coarse mode machine —
+    # DEC's radar-lead rule would otherwise hide the model exactly when it brakes best
+    # (behind a stopped car at a light), and its detector lag discards the model's early
+    # gentle braking. DEC keeps running for telemetry (blendedReason/urgency).
+    if self.model_decel_gate_enabled:
+      return experimental_mode
+
     if not self.dec.active():
       return experimental_mode
 
@@ -105,6 +124,10 @@ class LongitudinalPlannerSP:
     return self.output_v_target, self.output_a_target
 
   def update(self, sm: messaging.SubMaster) -> None:
+    self._frame_sp += 1
+    if self._frame_sp % int(PARAMS_UPDATE_PERIOD / DT_MDL) == 0:
+      self.model_decel_gate_enabled = self._params_sp.get_bool("BPModelDecelGate")
+
     self.events_sp.clear()
     self.dec.update(sm)
     self.e2e_alerts_helper.update(sm, self.events_sp)
@@ -119,6 +142,7 @@ class LongitudinalPlannerSP:
     longitudinalPlanSP.vTarget = float(self.output_v_target)
     longitudinalPlanSP.aTarget = float(self.output_a_target)
     longitudinalPlanSP.primaryLimiter = self.primary_limiter
+    longitudinalPlanSP.modelDecelGateActive = bool(self.model_decel_gate_enabled and self.decel_gate.active)
     longitudinalPlanSP.events = self.events_sp.to_msg()
 
     # Dynamic Experimental Control

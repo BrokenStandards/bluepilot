@@ -99,10 +99,19 @@ class CruiseLayout(Widget):
       description=tr("Enable toggle to allow the model to determine when to use sunnypilot ACC or sunnypilot End to End Longitudinal."),
       param="DynamicExperimentalControl")
 
+    # BluePilot: per-frame arbitration — takes precedence over DEC when both are enabled
+    self.model_decel_gate_toggle = toggle_item_sp(
+      title=tr("Model Decel Gate (E2E Brakes, ACC Accelerates)"),
+      description=tr("In Experimental Mode, the driving model may only slow the car (early braking for lights, " +
+                     "hazards and stops); ACC owns acceleration and cruise, so the model can no longer hold the car " +
+                     "below the set speed or speed limit. Takes precedence over Dynamic Experimental Control."),
+      param="BPModelDecelGate")
+
     items = [
       self.icbm_toggle,
       self.icbm_offset_item,
       self.dec_toggle,
+      self.model_decel_gate_toggle,
       self.scc_v_toggle,
       self.scc_m_toggle,
       self.custom_acc_toggle,
@@ -163,15 +172,18 @@ class CruiseLayout(Widget):
       if has_long or has_icbm:
         self.custom_acc_toggle.action_item.set_enabled(((has_long and not ui_state.CP.pcmCruise) or has_icbm) and ui_state.is_offroad())
         self.dec_toggle.action_item.set_enabled(has_long)
+        self.model_decel_gate_toggle.action_item.set_enabled(has_long)
         self.scc_v_toggle.action_item.set_enabled(True)
         self.scc_m_toggle.action_item.set_enabled(True)
       else:
         ui_state.params.remove("CustomAccIncrementsEnabled")
         ui_state.params.remove("DynamicExperimentalControl")
+        ui_state.params.remove("BPModelDecelGate")
         ui_state.params.remove("SmartCruiseControlVision")
         ui_state.params.remove("SmartCruiseControlMap")
         self.custom_acc_toggle.action_item.set_enabled(False)
         self.dec_toggle.action_item.set_enabled(False)
+        self.model_decel_gate_toggle.action_item.set_enabled(False)
         self.scc_v_toggle.action_item.set_enabled(False)
         self.scc_m_toggle.action_item.set_enabled(False)
 

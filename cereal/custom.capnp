@@ -195,6 +195,7 @@ struct LongitudinalPlanSP @0xf35cc4560bbf6ec2 {
   events @6 :List(OnroadEventSP.Event);
   e2eAlerts @7 :E2eAlerts;
   primaryLimiter @8 :PrimaryLimiter;  # BluePilot: which constraint produced this frame's accel target
+  modelDecelGateActive @9 :Bool;  # BluePilot: e2e accel currently allowed into the min() (decel intent)
 
   enum PrimaryLimiter {
     none @0;

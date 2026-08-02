@@ -61,6 +61,8 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     self.prev_accel_clip = [ACCEL_MIN, ACCEL_MAX]
     self.output_a_target = 0.0
     self.output_should_stop = False
+    # BluePilot: jerk-limited floor for the e2e branch on gate engage (never applied to the mpc)
+    self._gate_slew_accel = None
 
     self.v_desired_trajectory = np.zeros(CONTROL_N)
     self.a_desired_trajectory = np.zeros(CONTROL_N)
@@ -161,11 +163,38 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     output_should_stop_e2e = sm['modelV2'].action.shouldStop
 
     if self.is_e2e(sm):
-      output_a_target = min(output_a_target_e2e, output_a_target_mpc)
+      # BluePilot: with the model-decel gate, the e2e accel participates only while the model
+      # expresses deceleration intent — otherwise the MPC drives, so a model plateauing at
+      # ~0.0 accel can never hold the car below the set/limit target. shouldStop stays OR'd
+      # regardless (it only fires near standstill and is the stop-hold latch).
+      gate_in = True
+      if self.model_decel_gate_enabled:
+        model_v = sm['modelV2'].velocity.x
+        model_end_v = model_v[len(model_v) - 1] if len(model_v) else v_ego
+        was_active = self.decel_gate.active
+        gate_in = self.decel_gate.update(output_a_target_e2e, bool(output_should_stop_e2e), model_end_v, v_ego)
+        if gate_in and not was_active:
+          # jerk-limit the engage step: floor the e2e branch at last frame's output, ramping
+          # down at 2.5 m/s^3. The mpc term is never floored — lead braking stays untouched.
+          self._gate_slew_accel = float(self.output_a_target)
+
+      if gate_in:
+        e2e_a_target = output_a_target_e2e
+        if self._gate_slew_accel is not None:
+          self._gate_slew_accel -= 2.5 * self.dt
+          if self._gate_slew_accel <= output_a_target_e2e:
+            self._gate_slew_accel = None
+          else:
+            e2e_a_target = self._gate_slew_accel
+        output_a_target = min(e2e_a_target, output_a_target_mpc)
+        if output_a_target < output_a_target_mpc:
+          self.mpc.source = LongitudinalPlanSource.e2e
+      else:
+        self._gate_slew_accel = None
+        output_a_target = output_a_target_mpc
       self.output_should_stop = output_should_stop_e2e or output_should_stop_mpc
-      if output_a_target < output_a_target_mpc:
-        self.mpc.source = LongitudinalPlanSource.e2e
     else:
+      self._gate_slew_accel = None
       output_a_target = output_a_target_mpc
       self.output_should_stop = output_should_stop_mpc
 

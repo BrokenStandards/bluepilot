@@ -588,6 +588,26 @@
               ]
             },
             {
+              "key": "BPModelDecelGate",
+              "widget": "toggle",
+              "title": "Model Decel Gate (E2E Brakes, ACC Accelerates)",
+              "description": "In Experimental Mode, the driving model may only slow the car (early braking for lights, hazards and stops); ACC owns acceleration and cruise, so the model can no longer hold the car below the set speed or speed limit. Takes precedence over Dynamic Experimental Control.",
+              "visibility": [
+                {
+                  "type": "capability",
+                  "field": "has_longitudinal_control",
+                  "equals": true
+                }
+              ],
+              "enablement": [
+                {
+                  "type": "capability",
+                  "field": "has_longitudinal_control",
+                  "equals": true
+                }
+              ]
+            },
+            {
               "key": "DisengageOnAccelerator",
               "widget": "toggle",
               "title": "Disengage Cruise on Accelerator Pedal",

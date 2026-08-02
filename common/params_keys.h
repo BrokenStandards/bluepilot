@@ -343,6 +343,8 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"BPSpeedLimitSignOverlay", {PERSISTENT | BACKUP, BOOL, "1"}},
     // BluePilot: longitudinal target debug HUD (plan speed/accel + primary limiter)
     {"BPLongitudinalTargetHUD", {PERSISTENT | BACKUP, BOOL, "0"}},
+    // BluePilot: experimental-mode arbitration — e2e model may only decelerate; MPC owns acceleration
+    {"BPModelDecelGate", {PERSISTENT | BACKUP, BOOL, "0"}},
     {"BPAnimateSteeringWheel", {PERSISTENT | BACKUP, BOOL, "1"}},
     // BluePilot: No static defaults; the first active UI persists its matching device styles (C4=0, C3X=1).
     {"BPSteeringWheelIconStyle", {PERSISTENT | BACKUP, INT}},
