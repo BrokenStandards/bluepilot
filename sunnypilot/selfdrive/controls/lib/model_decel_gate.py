@@ -28,10 +28,11 @@ RELEASE_HYSTERESIS = 0.15  # m/s^2 (default engage -0.2 -> release -0.05)
 
 # m/s below v_ego for the model's 10 s plan-end speed. The end speed collapses toward 0 well
 # before instantaneous accel dips when approaching a red light — the EARLY engage signal.
-# Log-measured: plan-end sags 0.6-2.3 m/s below v_ego in ordinary cruise, so the engage
-# margin sits above that band; release re-arms at half of it.
+# Log-measured: plan-end sags 0.6-2.3 m/s below v_ego in ordinary cruise, so the DEFAULT
+# engage margin sits above that band; user-adjustable (BPModelDecelGateEndV, 0.00 .. -10.00,
+# stored as a negative delta) since sensitivity is a per-model preference. The release
+# margin re-arms at half the engage margin.
 ENGAGE_END_V_MARGIN = 2.0
-RELEASE_END_V_MARGIN = 1.0
 
 RELEASE_TIME = 0.5        # s of sustained all-clear before handing back to the MPC
 RELEASE_TIME_LOW_SPEED = 1.5  # s below LOW_SPEED (creep zone: keep the model's launch authority)
@@ -39,13 +40,13 @@ LOW_SPEED = 3.0           # m/s
 
 
 class ModelDecelGate:
-  def __init__(self, dt: float = DT_MDL, engage_accel: float = ENGAGE_ACCEL):
+  def __init__(self, dt: float = DT_MDL, engage_accel: float = ENGAGE_ACCEL,
+               end_v_margin: float = ENGAGE_END_V_MARGIN):
     self._dt = dt
     self._release_counter = 0
     self.active = False
-    self.engage_accel = engage_accel
-    self.release_accel = engage_accel + RELEASE_HYSTERESIS
     self.set_engage_accel(engage_accel)
+    self.set_end_v_margin(-end_v_margin)
 
   def set_engage_accel(self, engage_accel: float) -> None:
     # different models brake with different strength; the threshold is user-adjustable so
@@ -53,10 +54,16 @@ class ModelDecelGate:
     self.engage_accel = min(0.0, max(-5.0, engage_accel))
     self.release_accel = self.engage_accel + RELEASE_HYSTERESIS
 
+  def set_end_v_margin(self, end_v_delta: float) -> None:
+    # param convention: negative delta (plan end speed this far BELOW v_ego engages);
+    # stored internally as a positive margin. Release re-arms at half the engage margin.
+    self.end_v_margin = min(10.0, max(0.0, -end_v_delta))
+    self.release_end_v_margin = self.end_v_margin / 2.0
+
   def update(self, e2e_accel: float, e2e_should_stop: bool, model_end_v: float, v_ego: float) -> bool:
     decel_intent = (e2e_should_stop or
                     e2e_accel < self.engage_accel or
-                    model_end_v < v_ego - ENGAGE_END_V_MARGIN)
+                    model_end_v < v_ego - self.end_v_margin)
 
     if decel_intent:
       self.active = True
@@ -66,7 +73,7 @@ class ModelDecelGate:
     if self.active:
       all_clear = (not e2e_should_stop and
                    e2e_accel > self.release_accel and
-                   model_end_v > v_ego - RELEASE_END_V_MARGIN)
+                   model_end_v > v_ego - self.release_end_v_margin)
       if all_clear:
         self._release_counter += 1
         release_time = RELEASE_TIME_LOW_SPEED if v_ego < LOW_SPEED else RELEASE_TIME

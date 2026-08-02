@@ -129,6 +129,7 @@ class LongitudinalPlannerSP:
       self.model_decel_gate_enabled = self._params_sp.get_bool("BPModelDecelGate")
       try:
         self.decel_gate.set_engage_accel(float(self._params_sp.get("BPModelDecelGateAccel", return_default=True)))
+        self.decel_gate.set_end_v_margin(float(self._params_sp.get("BPModelDecelGateEndV", return_default=True)))
       except (TypeError, ValueError):
         pass
 

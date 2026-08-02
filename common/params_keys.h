@@ -347,6 +347,8 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"BPModelDecelGate", {PERSISTENT | BACKUP, BOOL, "0"}},
     // BluePilot: gate engage threshold, m/s^2 (0.00 .. -5.00); model-dependent brake strength
     {"BPModelDecelGateAccel", {PERSISTENT | BACKUP, FLOAT, "-0.20"}},
+    // BluePilot: gate plan-end engage margin, m/s as a negative delta below v_ego (0.00 .. -10.00)
+    {"BPModelDecelGateEndV", {PERSISTENT | BACKUP, FLOAT, "-2.00"}},
     // BluePilot: controller-icon contribution window, seconds (0.0 .. 5.0)
     {"BPLimiterWindow", {PERSISTENT | BACKUP, FLOAT, "4.0"}},
     {"BPAnimateSteeringWheel", {PERSISTENT | BACKUP, BOOL, "1"}},

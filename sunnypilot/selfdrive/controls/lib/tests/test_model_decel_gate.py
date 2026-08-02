@@ -105,3 +105,24 @@ class TestModelDecelGate:
     assert gate.engage_accel == -5.0
     gate.set_engage_accel(1.0)
     assert gate.engage_accel == 0.0
+
+  def test_adjustable_end_v_margin(self):
+    # wide margin: ordinary plan sag must not engage; deep collapse must
+    gate = ModelDecelGate(DT)
+    gate.set_end_v_margin(-6.0)
+    assert not run(gate, 20, accel=0.0, end_v=V_CRUISE - 5.0)
+    assert gate.update(0.0, False, V_CRUISE - 7.0, V_CRUISE) is True
+
+    # sensitive margin: small sag engages; release re-arms at half the margin
+    gate = ModelDecelGate(DT)
+    gate.set_end_v_margin(-0.5)
+    assert gate.update(0.0, False, V_CRUISE - 0.8, V_CRUISE) is True
+    assert run(gate, 200, accel=0.0, end_v=V_CRUISE - 0.4) is True  # inside hysteresis band
+    assert run(gate, int(RELEASE_TIME / DT) + 1, accel=0.0, end_v=V_CRUISE - 0.1) is False
+
+  def test_end_v_margin_clamped(self):
+    gate = ModelDecelGate(DT)
+    gate.set_end_v_margin(-99.0)
+    assert gate.end_v_margin == 10.0
+    gate.set_end_v_margin(2.0)  # positive input clamps to 0 (max sensitivity)
+    assert gate.end_v_margin == 0.0

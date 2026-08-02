@@ -34,6 +34,62 @@ sections:
     - $ref: '#/macros/longitudinal'
     enablement:
     - $ref: '#/macros/longitudinal'
+  - key: BPModelDecelGateAccel
+    widget: option
+    title: Decel Gate Engage Threshold
+    description: Model deceleration request (m/s²) that hands braking authority to the model.
+      Closer to 0.00 engages on the gentlest slowdowns (curves, crests, brake lights); more
+      negative requires harder model braking. Model dependent.
+    min: -5.0
+    max: 0.0
+    step: 0.01
+    unit:
+      metric: m/s²
+      imperial: m/s²
+    visibility:
+    - $ref: '#/macros/longitudinal'
+    enablement:
+    - $ref: '#/macros/longitudinal'
+    - type: param
+      key: BPModelDecelGate
+      equals: true
+  - key: BPModelDecelGateEndV
+    widget: option
+    title: Decel Gate Plan-End Margin
+    description: How far the model's 10-second plan-end speed must fall below the current speed
+      (m/s, negative delta) to hand braking authority to the model early. Closer to 0.00 is more
+      sensitive; the default -2.00 sits above ordinary cruise plan sag.
+    min: -10.0
+    max: 0.0
+    step: 0.1
+    unit:
+      metric: m/s
+      imperial: m/s
+    visibility:
+    - $ref: '#/macros/longitudinal'
+    enablement:
+    - $ref: '#/macros/longitudinal'
+    - type: param
+      key: BPModelDecelGate
+      equals: true
+  - key: BPLimiterWindow
+    widget: option
+    title: Longitudinal Controller Icons Window
+    description: Rolling window (seconds) over which the speed-sign controller icons rank and
+      color longitudinal controllers by their accel/decel contribution.
+    min: 0.0
+    max: 5.0
+    step: 0.1
+    unit:
+      metric: s
+      imperial: s
+    visibility:
+    - $ref: '#/macros/longitudinal'
+    enablement:
+    - $ref: '#/macros/offroad'
+    - type: param
+      key: BPLongitudinalTargetHUD
+      equals: true
   - key: DisengageOnAccelerator
     widget: toggle
     title: Disengage Cruise on Accelerator Pedal

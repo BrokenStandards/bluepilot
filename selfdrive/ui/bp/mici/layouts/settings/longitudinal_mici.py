@@ -25,6 +25,9 @@ class LongitudinalLayoutMici(NavScroller):
     self.model_decel_gate_accel = BigParamFloatControl(
       "Decel Gate Engage Threshold (m/s²)", "BPModelDecelGateAccel", min=-5.00, max=0.00, step=0.01,
     )
+    self.model_decel_gate_end_v = BigParamFloatControl(
+      "Decel Gate Plan-End Margin (m/s)", "BPModelDecelGateEndV", min=-10.00, max=0.00, step=0.1,
+    )
     self.limiter_window = BigParamFloatControl(
       "Controller Icons Window (s)", "BPLimiterWindow", min=0.0, max=5.0, step=0.1,
     )
@@ -36,6 +39,7 @@ class LongitudinalLayoutMici(NavScroller):
       self.disable_ford_radar,
       self.model_decel_gate,
       self.model_decel_gate_accel,
+      self.model_decel_gate_end_v,
       self.long_target_hud,
       self.limiter_window,
     ])
