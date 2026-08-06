@@ -1155,6 +1155,19 @@
               ]
             }
           ]
+        },
+        {
+          "id": "map_matching",
+          "title": "Map Matching",
+          "description": "",
+          "items": [
+            {
+              "key": "VisualRoutingAssist",
+              "widget": "toggle",
+              "title": "Visual Routing Assistance",
+              "description": "Uses the car's actual driven path in addition to GPS to match the road on ramps and forks sooner."
+            }
+          ]
         }
       ]
     },

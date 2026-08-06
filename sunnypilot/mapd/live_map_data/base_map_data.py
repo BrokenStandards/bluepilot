@@ -19,7 +19,9 @@ class BaseMapData(ABC):
   def __init__(self):
     self.params = Params()
 
-    self.sm = messaging.SubMaster(['liveLocationKalman'])
+    # BluePilot: controlsState provides desiredCurvature for the MapdCarContext mem param
+    self.sm = messaging.SubMaster(['liveLocationKalman', 'controlsState'])
+    # End BluePilot
     self.pm = messaging.PubMaster(['liveMapDataSP'])
 
     self.localizer_valid = False
@@ -42,6 +44,12 @@ class BaseMapData(ABC):
   def get_current_road_name(self) -> str:
     pass
 
+  # BluePilot: continuity-based speed-limit guess for untagged ways; sources that
+  # don't provide one keep the default "no guess"
+  def get_speed_limit_guess(self) -> tuple[float, str]:
+    return 0.0, ""
+  # End BluePilot
+
   def publish(self) -> None:
     speed_limit = self.get_current_speed_limit()
     next_speed_limit, next_speed_limit_distance = self.get_next_speed_limit_and_distance()
@@ -49,6 +57,21 @@ class BaseMapData(ABC):
     mapd_sp_send = messaging.new_message('liveMapDataSP')
     mapd_sp_send.valid = self.sm['liveLocationKalman'].gpsOK
     live_map_data = mapd_sp_send.liveMapDataSP
+
+    # BluePilot: fall back to the mapd_bp guess when the way has no maxspeed tag.
+    # A guessed limit publishes with speedLimitValid semantics unchanged so the
+    # resolver/SLA/HUD keep working; speedLimitGuessed marks its provenance.
+    speed_limit_guessed = False
+    speed_limit_guessed_source = ""
+    if speed_limit <= 0:
+      guess_speed_limit, guess_source = self.get_speed_limit_guess()
+      if guess_speed_limit > 0:
+        speed_limit = guess_speed_limit
+        speed_limit_guessed = True
+        speed_limit_guessed_source = guess_source
+    live_map_data.speedLimitGuessed = speed_limit_guessed
+    live_map_data.speedLimitGuessedSource = speed_limit_guessed_source
+    # End BluePilot
 
     live_map_data.speedLimitValid = bool(MAX_SPEED_LIMIT > speed_limit > 0)
     live_map_data.speedLimit = speed_limit

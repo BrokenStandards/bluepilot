@@ -69,6 +69,14 @@ class CruiseLayout(Widget):
       description=tr("Use map data to estimate the appropriate speed to drive through turns ahead."),
       param="SmartCruiseControlMap")
 
+    # BluePilot: mapd_bp reads this at runtime (no longitudinal dependency), so the
+    # toggle stays enabled regardless of has_long/has_icbm below.
+    self.visual_routing_assist_toggle = toggle_item_sp(
+      title=tr("Visual Routing Assistance"),
+      description=tr("Uses the car's actual driven path in addition to GPS to match the road on ramps and forks sooner."),
+      param="VisualRoutingAssist")
+    # End BluePilot
+
     self.custom_acc_toggle = toggle_item_sp(
       title=tr("Custom ACC Speed Increments"),
       description="",
@@ -114,6 +122,9 @@ class CruiseLayout(Widget):
       self.model_decel_gate_toggle,
       self.scc_v_toggle,
       self.scc_m_toggle,
+      # BluePilot: Visual Routing Assistance toggle
+      self.visual_routing_assist_toggle,
+      # End BluePilot
       self.custom_acc_toggle,
       self.custom_acc_short_increment,
       self.custom_acc_long_increment,

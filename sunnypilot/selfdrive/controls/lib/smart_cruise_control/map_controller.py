@@ -26,6 +26,12 @@ TARGET_OFFSET = 1.0  # seconds - This controls how soon before the curve you rea
                      # done to keep the distance calculations consistent but results in the offset actually being less
                      # time than specified depending on how much of a speed differential there is between v_ego and the
                      # target velocity.
+PATH_REVERSAL_DEGREES = 150.0  # degrees - a forward-path segment whose bearing reverses by more than this vs the
+                               # previous segment is a looped/U-turn chain doubling back on itself (same threshold
+                               # as mapd's next-way U-turn rejection); the road ahead never bends this sharply
+                               # between adjacent points, so the forward path is truncated there.
+MIN_SEGMENT_DISTANCE = 0.1  # meters - segments shorter than this carry no meaningful bearing (duplicate or
+                            # jittering points), so they are skipped when looking for a bearing reversal.
 
 
 def velocities_from_param(param: str, params: Params):
@@ -60,6 +66,22 @@ def distance_to_point(ax, ay, bx, by):
   c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
 
   return R * c  # in meters
+
+
+# points should be in radians
+# output is the initial bearing from a to b in degrees, in [-180, 180]
+def bearing_to_point(ax, ay, bx, by):
+  d_lon = by - ay
+  x = math.sin(d_lon) * math.cos(bx)
+  y = math.cos(ax) * math.sin(bx) - math.sin(ax) * math.cos(bx) * math.cos(d_lon)
+
+  return math.atan2(x, y) * TO_DEGREES
+
+
+# bearings should be in degrees
+# output is the signed smallest angle from bearing a to bearing b in degrees, in [-180, 180)
+def bearing_delta(a, b):
+  return (b - a + 180) % 360 - 180
 
 
 class SmartCruiseControlMap:
@@ -127,7 +149,26 @@ class SmartCruiseControlMap:
 
     # only look at values from our current position forward
     forward_points = self.target_velocities[min_idx:]
-    forward_distances = distances[min_idx:]
+
+    # measure distance to each forward point along the road instead of as the crow flies: seed with the
+    # crow-flight distance to the nearest point, then accumulate point-to-point segment lengths. The walk
+    # stops at the first segment whose bearing reverses by more than PATH_REVERSAL_DEGREES vs the previous
+    # one - points past a reversal belong to a looped/U-turn chain doubling back on us, not the road ahead.
+    forward_distances = [distances[min_idx]] if forward_points else []
+    prev_bearing = None
+    for i in range(1, len(forward_points)):
+      alat = forward_points[i - 1]["latitude"] * TO_RADIANS
+      alon = forward_points[i - 1]["longitude"] * TO_RADIANS
+      blat = forward_points[i]["latitude"] * TO_RADIANS
+      blon = forward_points[i]["longitude"] * TO_RADIANS
+      segment_distance = distance_to_point(alat, alon, blat, blon)
+      if segment_distance >= MIN_SEGMENT_DISTANCE:
+        bearing = bearing_to_point(alat, alon, blat, blon)
+        if prev_bearing is not None and abs(bearing_delta(prev_bearing, bearing)) > PATH_REVERSAL_DEGREES:
+          forward_points = forward_points[:i]
+          break
+        prev_bearing = bearing
+      forward_distances.append(forward_distances[-1] + segment_distance)
 
     # find velocities that we are within the distance we need to adjust for
     valid_velocities = []

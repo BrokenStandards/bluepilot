@@ -11,19 +11,22 @@ import re
 
 from openpilot.sunnypilot import get_file_hash
 from openpilot.common.basedir import BASEDIR
-from openpilot.sunnypilot.mapd import MAPD_PATH
+from openpilot.sunnypilot.mapd import MAPD_BIN_DIR
 
 MAPD_HASH_PATH = os.path.join(BASEDIR, "sunnypilot", "mapd", "tests", "mapd_hash")
 MAPD_VERSION_PATH = os.path.join(BASEDIR, "sunnypilot", "mapd", "mapd_installer.py")
 
+# BluePilot: MAPD_PATH is arch-dependent, so the hash file pins every committed binary keyed by name
+MAPD_BIN_NAMES = ("mapd", "mapd-x86_64")
+
 
 def update_mapd_hash():
-  mapd_hash = get_file_hash(MAPD_PATH)
-
   with open(MAPD_HASH_PATH, "w") as f:
-    f.write(mapd_hash)
+    for bin_name in MAPD_BIN_NAMES:
+      bin_hash = get_file_hash(os.path.join(MAPD_BIN_DIR, bin_name))
+      f.write(f"{bin_name}:{bin_hash}\n")
 
-  print(f"Generated and updated new mapd hash to {MAPD_HASH_PATH}")
+  print(f"Generated and updated new mapd hashes to {MAPD_HASH_PATH}")
 
 
 def get_current_mapd_version(path: str) -> str:

@@ -243,6 +243,11 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
 
     // mapd
     {"MapAdvisorySpeedLimit", {CLEAR_ON_ONROAD_TRANSITION, FLOAT}},
+    // BluePilot: mapd_bp car context + speed-limit guess exchange (mem params) and Visual Routing Assistance toggle
+    {"MapdCarContext", {CLEAR_ON_ONROAD_TRANSITION, JSON}},
+    {"MapSpeedLimitGuess", {CLEAR_ON_ONROAD_TRANSITION, JSON}},
+    {"VisualRoutingAssist", {PERSISTENT | BACKUP, BOOL, "0"}},
+    // End BluePilot
     {"MapdVersion", {PERSISTENT, STRING}},
     {"MapSpeedLimit", {CLEAR_ON_ONROAD_TRANSITION, FLOAT, "0.0"}},
     {"NextMapSpeedLimit", {CLEAR_ON_ONROAD_TRANSITION, JSON}},

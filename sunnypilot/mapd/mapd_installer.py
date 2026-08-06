@@ -22,8 +22,28 @@ from openpilot.system.version import is_prebuilt
 from openpilot.sunnypilot.mapd import MAPD_PATH, MAPD_BIN_DIR
 import openpilot.system.sentry as sentry
 
-VERSION = "v1.12.0"
-URL = f"https://github.com/pfeiferj/openpilot-mapd/releases/download/{VERSION}/mapd"
+# BluePilot: the committed binaries in third_party/mapd_bp are authoritative; VERSION is read
+# from the VERSION file shipped next to them. The pfeiferj release download below is kept ONLY
+# as a fallback for when the committed binary is missing — it serves stock v1.12.0 WITHOUT the
+# BP fixes (U-turn rejection, lane-count-gated flattening, speed-limit guess, divergence rematch).
+FALLBACK_VERSION = "v1.12.0"
+URL = f"https://github.com/pfeiferj/openpilot-mapd/releases/download/{FALLBACK_VERSION}/mapd"
+VERSION_PATH = os.path.join(MAPD_BIN_DIR, 'VERSION')
+
+
+def _read_committed_version() -> str:
+  try:
+    with open(VERSION_PATH) as f:
+      version = f.read().strip()
+      if version:
+        return version
+  except OSError:
+    pass
+  return FALLBACK_VERSION
+
+
+VERSION = _read_committed_version()
+# End BluePilot
 
 
 def update_installed_version(version: str, params: Params = None) -> None:
@@ -41,14 +61,22 @@ class MapdInstallManager:
   def download(self) -> None:
     self.ensure_directories_exist()
     self._download_file()
-    update_installed_version(VERSION, self._params)
+    # BluePilot: the fallback download serves the stock pfeiferj release, so record its version
+    update_installed_version(FALLBACK_VERSION, self._params)
+    # End BluePilot
 
   def check_and_download(self) -> None:
     if self.download_needed():
       self.download()
+    # BluePilot: committed binary present — never download, only sync the installed-version param
+    else:
+      update_installed_version(VERSION, self._params)
+    # End BluePilot
 
   def download_needed(self) -> bool:
-    return not os.path.exists(MAPD_PATH) or self.get_installed_version() != VERSION
+    # BluePilot: the committed binary is authoritative; download only when it is missing
+    return not os.path.exists(MAPD_PATH)
+    # End BluePilot
 
   @staticmethod
   def ensure_directories_exist() -> None:
@@ -124,7 +152,9 @@ class MapdInstallManager:
         return
 
       if self.wait_for_internet_connection(return_on_failure=True):
-        self._spinner.update(f"Downloading pfeiferj's mapd [{self.get_installed_version()}] => [{VERSION}].")
+        # BluePilot: fallback path — committed binary missing, fetch stock pfeiferj release
+        self._spinner.update(f"Downloading pfeiferj's mapd [{self.get_installed_version()}] => [{FALLBACK_VERSION}].")
+        # End BluePilot
         time.sleep(0.1)
         self.check_and_download()
       self._spinner.close()

@@ -473,6 +473,10 @@ struct LiveMapDataSP @0xf416ec09499d9d19 {
   speedLimitAhead @3 :Float32;
   speedLimitAheadDistance @4 :Float32;
   roadName @5 :Text;
+  # BluePilot: speed-limit continuity guess for untagged ways (mapd_bp)
+  speedLimitGuessed @6 :Bool;             # speedLimit came from the mapd guess, not an OSM maxspeed tag
+  speedLimitGuessedSource @7 :Text;       # "backward" | "forward" | "both" | ""
+  # End BluePilot
 }
 
 struct ModelDataV2SP @0xa1680744031fdb2d {

@@ -349,3 +349,14 @@ sections:
       - type: capability
         field: has_icbm
         equals: true
+- id: map_matching
+  # BluePilot: mapd_bp road matching; no longitudinal/ICBM dependency, so it sits
+  # outside the capability-gated smart_cruise section
+  title: Map Matching
+  description: ''
+  items:
+  - key: VisualRoutingAssist
+    widget: toggle
+    title: Visual Routing Assistance
+    description: Uses the car's actual driven path in addition to GPS to match the road on ramps
+      and forks sooner.

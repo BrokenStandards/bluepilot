@@ -103,6 +103,10 @@ class SpeedLimitRenderer(Widget, SpeedLimitAlertRenderer):
     self.speed_limit_final_last = 0.0
     self.speed_limit_source = SpeedLimitSource.none
     self.speed_limit_assist_state = AssistState.disabled
+    # BluePilot: liveMapDataSP.speedLimitGuessed — map limit came from the mapd_bp
+    # continuity guess, not an OSM maxspeed tag; shown as a grey sign outline
+    self.speed_limit_guessed = False
+    # End BluePilot
 
     self.speed_limit_ahead = 0.0
     self.speed_limit_ahead_dist = 0.0
@@ -151,6 +155,9 @@ class SpeedLimitRenderer(Widget, SpeedLimitAlertRenderer):
       self.speed_limit_ahead_valid = lmd.speedLimitAheadValid
       self.speed_limit_ahead = lmd.speedLimitAhead * self.speed_conv
       self.speed_limit_ahead_dist = lmd.speedLimitAheadDistance
+      # BluePilot: provenance of the map limit for the grey guessed-sign outline
+      self.speed_limit_guessed = lmd.speedLimitGuessed
+      # End BluePilot
 
       if self.speed_limit_ahead_dist < self.speed_limit_ahead_dist_prev and self.speed_limit_ahead_frame < AHEAD_THRESHOLD:
         self.speed_limit_ahead_frame += 1
@@ -214,10 +221,15 @@ class SpeedLimitRenderer(Widget, SpeedLimitAlertRenderer):
     elif not self.speed_limit_valid:
       txt_color = Colors.GREY
 
+    # BluePilot: only a map-sourced limit can be a guess; grey the sign outline so
+    # the driver can tell a continuity guess from a signed/tagged limit
+    guessed = has_limit and self.speed_limit_guessed and self.speed_limit_source == SpeedLimitSource.map
+    # End BluePilot
+
     if ui_state.is_metric:
-      self._render_vienna(rect, limit_str, sub_text, txt_color, has_limit, alpha)
+      self._render_vienna(rect, limit_str, sub_text, txt_color, has_limit, alpha, guessed)
     else:
-      self._render_mutcd(rect, limit_str, sub_text, txt_color, has_limit, alpha)
+      self._render_mutcd(rect, limit_str, sub_text, txt_color, has_limit, alpha, guessed)
 
   def _draw_pre_active_arrow(self, sign_rect):
     _, txt_icon, icon_alpha, _, _ = SpeedLimitAlertRenderer.speed_limit_pre_active_icon_helper(self)
@@ -229,18 +241,20 @@ class SpeedLimitRenderer(Widget, SpeedLimitAlertRenderer):
       color = rl.Color(255, 255, 255, int(icon_alpha))
       rl.draw_texture_ex(txt_icon, rl.Vector2(arrow_x, arrow_y), 0.0, 1.0, color)
 
-  def _render_vienna(self, rect, val, sub, color, has_limit, alpha=1.0):
+  def _render_vienna(self, rect, val, sub, color, has_limit, alpha=1.0, guessed=False):
     center = rl.Vector2(rect.x + rect.width / 2, rect.y + rect.height / 2)
     radius = (rect.width + 18) / 2
 
     white = rl.color_alpha(Colors.WHITE, alpha)
-    red = rl.color_alpha(Colors.RED, alpha)
+    # BluePilot: grey ring instead of red marks a guessed (continuity-derived) map limit
+    ring_color = rl.color_alpha(Colors.GREY if guessed else Colors.RED, alpha)
+    # End BluePilot
     black = rl.color_alpha(Colors.BLACK, alpha)
     dark_grey = rl.color_alpha(Colors.DARK_GREY, alpha)
     text_color = rl.color_alpha(color, alpha)
 
     rl.draw_circle_v(center, radius, white)
-    rl.draw_ring(center, radius * 0.75, radius, 0, 360, 36, red)
+    rl.draw_ring(center, radius * 0.75, radius, 0, 360, 36, ring_color)
 
     font_size = 70 if len(val) >= 3 else 85
     self._draw_text_centered(self.font_bold, val, font_size, center, text_color)
@@ -255,9 +269,12 @@ class SpeedLimitRenderer(Widget, SpeedLimitAlertRenderer):
       font_scale = 0.5 if len(sub) < 3 else 0.45
       self._draw_text_centered(self.font_bold, sub, int(s_radius * 2 * font_scale), s_center, white)
 
-  def _render_mutcd(self, rect, val, sub, color, has_limit, alpha=1.0):
+  def _render_mutcd(self, rect, val, sub, color, has_limit, alpha=1.0, guessed=False):
     white = rl.color_alpha(Colors.WHITE, alpha)
     black = rl.color_alpha(Colors.BLACK, alpha)
+    # BluePilot: grey border instead of black marks a guessed (continuity-derived) map limit
+    border_color = rl.color_alpha(Colors.GREY, alpha) if guessed else black
+    # End BluePilot
     dark_grey = rl.color_alpha(Colors.DARK_GREY, alpha)
     text_color = rl.color_alpha(color, alpha)
 
@@ -268,7 +285,7 @@ class SpeedLimitRenderer(Widget, SpeedLimitAlertRenderer):
     inner_radius = outer_radius - 10.0
     inner_roundness = inner_radius / (inner.width / 2.0)
 
-    rl.draw_rectangle_rounded_lines_ex(inner, inner_roundness, 10, 4, black)
+    rl.draw_rectangle_rounded_lines_ex(inner, inner_roundness, 10, 4, border_color)
 
     self._draw_text_centered(self.font_demi, "SPEED", 40, rl.Vector2(rect.x + rect.width / 2, rect.y + 40), black)
     self._draw_text_centered(self.font_demi, "LIMIT", 40, rl.Vector2(rect.x + rect.width / 2, rect.y + 80), black)

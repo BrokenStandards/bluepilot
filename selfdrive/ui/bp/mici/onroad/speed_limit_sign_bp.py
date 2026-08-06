@@ -42,6 +42,7 @@ from openpilot.system.ui.lib.text_measure import measure_text_cached
 from openpilot.system.ui.widgets import Widget
 
 AssistState = custom.LongitudinalPlanSP.SpeedLimit.AssistState
+SpeedLimitSource = custom.LongitudinalPlanSP.SpeedLimit.Source
 VisionState = custom.LongitudinalPlanSP.SmartCruiseControl.VisionState
 MapState = custom.LongitudinalPlanSP.SmartCruiseControl.MapState
 PrimaryLimiter = custom.LongitudinalPlanSP.PrimaryLimiter
@@ -124,6 +125,9 @@ class MiciSpeedLimitSign(Widget):
     self._speed_limit_valid = False
     self._has_limit = False
     self._speed_limit_final_last = 0.0
+    # guessed limit (mapd_bp continuity guess, no OSM maxspeed tag): grey outline
+    # replaces the MUTCD black border / Vienna red ring
+    self._speed_limit_guessed = False
     self._speed = 0.0
 
     self._curve_active = False
@@ -196,6 +200,7 @@ class MiciSpeedLimitSign(Widget):
       self._speed_limit = 0.0
       self._speed_limit_valid = False
       self._has_limit = False
+      self._speed_limit_guessed = False
       self._flash_until = 0.0
       self._alert_flash = False
       self._curve_active_prev = False
@@ -214,6 +219,9 @@ class MiciSpeedLimitSign(Widget):
     self._speed_limit_valid = resolver.speedLimitValid
     self._has_limit = resolver.speedLimitValid or resolver.speedLimitLastValid
     self._speed_limit_final_last = resolver.speedLimitFinalLast * self._speed_conv
+    # only a map-sourced limit can be a guess; car-state limits are always signed
+    self._speed_limit_guessed = (sm['liveMapDataSP'].speedLimitGuessed and
+                                 resolver.source == SpeedLimitSource.map)
 
     car_state = sm['carState']
     v_ego = car_state.vEgoCluster if car_state.vEgoCluster != 0.0 else car_state.vEgo
@@ -328,7 +336,8 @@ class MiciSpeedLimitSign(Widget):
 
     rl.draw_rectangle_rounded(sign_rect, 0.25, 8, white)
     inner = rl.Rectangle(x + 4, y + 4, MUTCD_W - 8, MUTCD_H - 8)
-    rl.draw_rectangle_rounded_lines_ex(inner, 0.25, 8, 2, black)
+    border = rl.color_alpha(GREY, alpha) if self._speed_limit_guessed else black
+    rl.draw_rectangle_rounded_lines_ex(inner, 0.25, 8, 2, border)
 
     self._draw_text_centered(self._font_semi_bold, "SPEED", 13, cx, y + 14, black)
     self._draw_text_centered(self._font_semi_bold, "LIMIT", 13, cx, y + 27, black)
@@ -340,7 +349,8 @@ class MiciSpeedLimitSign(Widget):
     center = rl.Vector2(cx, cy)
 
     rl.draw_circle_v(center, radius, rl.color_alpha(WHITE, alpha))
-    rl.draw_ring(center, radius * 0.72, radius, 0, 360, 36, rl.color_alpha(RED, alpha))
+    ring = GREY if self._speed_limit_guessed else RED
+    rl.draw_ring(center, radius * 0.72, radius, 0, 360, 36, rl.color_alpha(ring, alpha))
 
     val = str(round(self._speed_limit))
     font_size = 26 if len(val) >= 3 else 32
