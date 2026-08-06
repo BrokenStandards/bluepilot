@@ -10,9 +10,11 @@ The longitudinal target lives at the bottom center, over the steering torque cur
 text, with up to three road-sign icons above it naming the longitudinal controllers.
 Leftmost is the current controller; the two slots right of it are the largest
 contributors over a rolling window (BPLimiterWindow, 0-5 s) ranked by gross |accel|
-contribution. All icons are the same 48px size, matching the experimental flask on the
-home screen. The sign yields to the transient set-speed readout that owns the top-left
-corner (same protocol as the DM face). Icon language:
+contribution. The row is keyed by glyph rather than by controller, so an icon shared by
+several controllers can never occupy two slots. All icons are the same 48px size,
+matching the experimental flask on the home screen. The sign yields to the transient
+set-speed readout that owns the top-left corner (same protocol as the DM face). Icon
+language:
   curve triangle = vision/map curve control     octagon = stopped / model stop intent
   following-distance circle = lead              gauge = cruise set speed / accel schedule
   experimental flask = e2e model                BRAKE = manual braking
@@ -31,7 +33,9 @@ from cereal import custom
 from openpilot.common.constants import CV
 from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.common.params import Params
-from openpilot.selfdrive.ui.bp.lib.limiter_window import ContributionWindow
+from openpilot.selfdrive.ui.bp.lib.limiter_window import (
+  BRAKE_CONTROLLER, ContributionWindow, icon_key,
+  ICON_BRAKE, ICON_CRUISE, ICON_CURVE, ICON_LEAD, ICON_MODEL, ICON_STOP)
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.system.ui.lib.application import gui_app, FontWeight
 from openpilot.system.ui.lib.text_measure import measure_text_cached
@@ -52,9 +56,6 @@ SLA_FLASH_EVENTS = ('speedLimitActive', 'speedLimitChanged', 'speedLimitPending'
 FLASH_DURATION = 5.0  # s, matches the old text alert / chime alert duration
 PARAM_REFRESH_FRAMES = 60
 V_TARGET_UNSET = 200.0  # m/s; inactive controllers publish V_CRUISE_UNSET (255)
-
-# UI-side pseudo-controller for driver braking (outside the capnp enum range)
-BRAKE_CONTROLLER = 1000
 
 # Sign column: centered on the DM face (16 + 60/2) and steering wheel (21 + 50/2)
 # column, vertically between the face (bottom y=70) and the powerflow arc around the
@@ -129,7 +130,7 @@ class MiciSpeedLimitSign(Widget):
     self._current_controller: int | None = None
     self._model_stopping = False
     self._target_value: float | None = None  # display units
-    self._slots: list[tuple[int, float] | None] = [None, None, None]  # (controller, net_dv)
+    self._slots: list[tuple[str, float] | None] = [None, None, None]  # (glyph, net_dv)
 
     # the transient set-speed readout owns the top-left corner; the sign yields to it
     self._top_icons_active = False
@@ -239,20 +240,26 @@ class MiciSpeedLimitSign(Widget):
       if car_state.brakePressed:
         self._window.add(now, BRAKE_CONTROLLER, min(car_state.aEgo, 0.0))
         self._current_controller = BRAKE_CONTROLLER
-    self._window.prune(now)
 
-    # slot 0: current controller; slots 1-2: top contributors in the window, excluding
-    # slot 0 and SLA (the sign itself is SLA's indication). Schema-side enum attrs compare
-    # equal to the raw ints stored in the window.
-    slots: list[tuple[int, float] | None] = [None, None, None]
-    hidden = (PrimaryLimiter.speedLimitAssist,)
+    # The row is keyed by glyph, not by controller: several controllers share one icon
+    # (vision/map curve, cruise/accel-clip, stopped/model-while-stopping, brake/force-decel),
+    # so keying by controller could put the same icon in two slots. Slot 0 is the current
+    # controller's glyph; slots 1-2 are the largest other glyph groups in the window. SLA
+    # has no glyph — the speed limit sign is its indication.
+    groups = self._window.ranked_groups(now, self._icon_key)
     current = self._current_controller
-    if current is not None and current not in hidden:
-      slots[0] = (current, self._window.net(current))
-    exclude = hidden + ((current,) if current is not None else ())
-    for i, controller in enumerate(self._window.contributors(now, exclude=exclude, n=2)):
-      slots[i + 1] = (controller, self._window.net(controller))
+    current_glyph = self._icon_key(current) if current is not None else ''
+
+    slots: list[tuple[str, float] | None] = [None, None, None]
+    if current_glyph:
+      net = next((n for glyph, n in groups if glyph == current_glyph), 0.0)
+      slots[0] = (current_glyph, net)
+    for i, group in enumerate([g for g in groups if g[0] != current_glyph][:2]):
+      slots[i + 1] = group
     self._slots = slots
+
+  def _icon_key(self, controller: int) -> str:
+    return icon_key(controller, self._model_stopping)
 
   @property
   def _flashing(self) -> bool:
@@ -369,29 +376,26 @@ class MiciSpeedLimitSign(Widget):
     for i, slot in enumerate(self._slots):
       if slot is None:
         continue
-      controller, net_dv = slot
+      glyph, net_dv = slot
       tint, dy = self._contrib_style(net_dv, alpha)
       icon_cx = row_left + (i + 0.5) * ICON_SLOT_W
-      self._draw_controller_icon(controller, icon_cx, row_cy + dy, ICON_R, tint, alpha)
+      self._draw_icon(glyph, icon_cx, row_cy + dy, ICON_R, tint, alpha)
 
-  def _draw_controller_icon(self, controller: int, cx: float, cy: float, r: float,
-                            tint: rl.Color, alpha: float) -> None:
-    if controller == BRAKE_CONTROLLER or controller == PrimaryLimiter.forceDecel:
+  def _draw_icon(self, glyph: str, cx: float, cy: float, r: float,
+                 tint: rl.Color, alpha: float) -> None:
+    if glyph == ICON_BRAKE:
       self._draw_text_centered(self._font_bold, "BRAKE", BRAKE_FONT_SIZE, cx, cy, tint)
-    elif controller == PrimaryLimiter.stopped:
+    elif glyph == ICON_STOP:
       self._draw_octagon(cx, cy, r, tint, alpha)
-    elif controller == PrimaryLimiter.model:
-      if self._model_stopping:
-        self._draw_octagon(cx, cy, r, tint, alpha)
-      else:
-        scale = (2 * r) / self._experimental_tex.width
-        pos = rl.Vector2(cx - self._experimental_tex.width * scale / 2, cy - self._experimental_tex.height * scale / 2)
-        rl.draw_texture_ex(self._experimental_tex, pos, 0.0, scale, tint)
-    elif controller in (PrimaryLimiter.sccVision, PrimaryLimiter.sccMap):
+    elif glyph == ICON_MODEL:
+      scale = (2 * r) / self._experimental_tex.width
+      pos = rl.Vector2(cx - self._experimental_tex.width * scale / 2, cy - self._experimental_tex.height * scale / 2)
+      rl.draw_texture_ex(self._experimental_tex, pos, 0.0, scale, tint)
+    elif glyph == ICON_CURVE:
       self._draw_curve_triangle(cx, cy, r, tint)
-    elif controller == PrimaryLimiter.lead:
+    elif glyph == ICON_LEAD:
       self._draw_following_distance(cx, cy, r, tint)
-    elif controller in (PrimaryLimiter.cruise, PrimaryLimiter.accelClip):
+    elif glyph == ICON_CRUISE:
       self._draw_cruise_gauge(cx, cy, r, tint)
 
   def _draw_octagon(self, cx: float, cy: float, r: float, tint: rl.Color, alpha: float) -> None:
