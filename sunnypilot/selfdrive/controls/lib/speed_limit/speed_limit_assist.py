@@ -102,6 +102,11 @@ class SpeedLimitAssist:
     self._set_speed_hint_shown = False
     self._set_speed_hint_frames = -1
     self._raise_set_speed_prompted = False
+    # Consent latch: the confirm press authorizes automatic speed changes for the whole
+    # engagement. Coverage gaps (pending) and handshake timeouts (inactive) re-arm to
+    # active directly instead of demanding another press; only disengagement (or turning
+    # SLA off) clears it.
+    self._pcm_long_consented = False
     self.alpha_long_offset = int(self.params.get("AlphaLongIcbmOffset", return_default=True))
     self.suggested_set_speed_conv = 0
     # ICBM manages the cluster under alpha long: ceiling prompts are its job, not the driver's
@@ -290,6 +295,8 @@ class SpeedLimitAssist:
     if self.state != SpeedLimitAssistState.disabled:
       if not self.long_enabled or not self.enabled:
         self.state = SpeedLimitAssistState.disabled
+        # disengagement ends the consent session; the next engagement confirms afresh
+        self._pcm_long_consented = False
 
       else:
         # ACTIVE
@@ -299,7 +306,8 @@ class SpeedLimitAssist:
         # or turning Speed Limit Assist off. Losing the limit (coverage gap past the resolver
         # hold) drops to pending, which releases the cap audibly instead of silently.
         # Once active, limit changes auto-apply in BOTH directions with only the chime and the
-        # sign-overlay flash — the confirm handshake exists solely for initial activation.
+        # sign-overlay flash — the confirm handshake exists solely for the first activation of
+        # the engagement (the consent latch below).
         if self.state == SpeedLimitAssistState.active:
           if not self._has_speed_limit:
             self.state = SpeedLimitAssistState.pending
@@ -314,9 +322,15 @@ class SpeedLimitAssist:
             self.state = SpeedLimitAssistState.active
 
         # PENDING
+        # BluePilot: with consent already given this engagement, a reacquired limit re-caps
+        # directly (chime + sign flash) — re-confirming through every map-coverage gap would
+        # nag the driver for a decision they already made.
         elif self.state == SpeedLimitAssistState.pending:
           if self.speed_limit_changed:
-            self._enter_pre_active()
+            if self._pcm_long_consented:
+              self._update_confirmed_state()
+            else:
+              self._enter_pre_active()
 
         # PRE_ACTIVE
         # BluePilot: consent is a single fresh SET+/SET- press — the old exact 120/130 km/h
@@ -325,6 +339,7 @@ class SpeedLimitAssist:
           if not self._has_speed_limit:
             self.state = SpeedLimitAssistState.pending
           elif self._pcm_long_consent():
+            self._pcm_long_consented = True
             self._update_confirmed_state()
           elif self.pre_active_timer <= 0:
             # Timeout - session ended
@@ -332,10 +347,14 @@ class SpeedLimitAssist:
 
         # INACTIVE
         # BluePilot: recoverable (was a dead end until re-engagement) — a new limit re-arms the
-        # confirm handshake, mirroring the non-pcm state machine.
+        # confirm handshake, or re-activates directly when consent was already given this
+        # engagement.
         elif self.state == SpeedLimitAssistState.inactive:
           if self.speed_limit_changed:
-            self._enter_pre_active()
+            if self._pcm_long_consented:
+              self._update_confirmed_state()
+            else:
+              self._enter_pre_active()
 
     # DISABLED
     elif self.state == SpeedLimitAssistState.disabled:

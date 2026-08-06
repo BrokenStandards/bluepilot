@@ -369,6 +369,70 @@ class TestSpeedLimitAssist:
                     SPEED_LIMITS['city'], True, 0, self.events_sp)
     assert self.sla.state == SpeedLimitAssistState.preActive
 
+  def _consent_to_active(self):
+    """Confirm the handshake once: preActive + fresh press -> active with consent latched."""
+    self.sla.state = SpeedLimitAssistState.preActive
+    self.press_cruise_button()
+    self.sla.update(True, False, SPEED_LIMITS['city'], 0, self.pcm_long_max_set_speed, SPEED_LIMITS['city'],
+                    SPEED_LIMITS['city'], True, 0, self.events_sp)
+    assert self.sla.state == SpeedLimitAssistState.active
+
+  def test_consent_latched_through_limit_gap(self):
+    # once the driver consents, a map-coverage gap must not demand another press: the
+    # reacquired limit re-caps directly with the chime, never the preActive prompt
+    self._consent_to_active()
+
+    # coverage gap outlasting the resolver hold
+    self.sla.update(True, False, SPEED_LIMITS['city'], 0, self.pcm_long_max_set_speed, 0, 0, False, 0, self.events_sp)
+    assert self.sla.state == SpeedLimitAssistState.pending
+
+    self.events_sp.clear()
+    self.sla.update(True, False, SPEED_LIMITS['city'], 0, self.pcm_long_max_set_speed, SPEED_LIMITS['highway'],
+                    SPEED_LIMITS['highway'], True, 0, self.events_sp)
+    assert self.sla.state == SpeedLimitAssistState.active
+    assert self.sla.output_v_target == SPEED_LIMITS['highway']
+    assert EventNameSP.speedLimitPreActive not in self.events_sp.names
+    assert (EventNameSP.speedLimitActive in self.events_sp.names or
+            EventNameSP.speedLimitChanged in self.events_sp.names)
+
+  def test_consent_latched_from_inactive(self):
+    # a preActive timeout after consent (e.g. re-armed by an unconsented flow) still
+    # re-activates directly on the next limit
+    self._consent_to_active()
+    self.sla.state = SpeedLimitAssistState.inactive
+
+    self.sla.update(True, False, SPEED_LIMITS['city'], 0, self.pcm_long_max_set_speed, SPEED_LIMITS['residential'],
+                    SPEED_LIMITS['residential'], True, 0, self.events_sp)
+    assert self.sla.state in ACTIVE_STATES
+
+  def test_consent_cleared_on_disengagement(self):
+    # disengaging ends the consent session: the next engagement confirms afresh
+    self._consent_to_active()
+
+    self.sla.update(False, False, SPEED_LIMITS['city'], 0, self.pcm_long_max_set_speed, SPEED_LIMITS['city'],
+                    SPEED_LIMITS['city'], True, 0, self.events_sp)
+    assert self.sla.state == SpeedLimitAssistState.disabled
+
+    # re-engage: after the engage guard, a limit re-arms the confirm handshake — active
+    # only after a fresh press
+    for _ in range(int(2. / DT_MDL)):
+      self.sla.update(True, False, SPEED_LIMITS['city'], 0, self.pcm_long_max_set_speed, SPEED_LIMITS['city'],
+                      SPEED_LIMITS['city'], True, 0, self.events_sp)
+    assert self.sla.state == SpeedLimitAssistState.preActive
+
+    self.press_cruise_button()
+    self.sla.update(True, False, SPEED_LIMITS['city'], 0, self.pcm_long_max_set_speed, SPEED_LIMITS['city'],
+                    SPEED_LIMITS['city'], True, 0, self.events_sp)
+    assert self.sla.state == SpeedLimitAssistState.active
+
+  def test_consent_cleared_when_sla_disabled(self):
+    # turning Speed Limit Assist off mid-drive also ends the consent session
+    self._consent_to_active()
+    self.sla.enabled = False
+    self.sla.update_state_machine_pcm_op_long()
+    assert self.sla.state == SpeedLimitAssistState.disabled
+    assert not self.sla._pcm_long_consented
+
   def test_raise_set_speed_prompt_once_per_episode(self):
     # cluster below the limit: prompt exactly once until the cluster recovers above the limit
     cluster = 30 * CV.MPH_TO_MS  # below the 35 mph city limit
