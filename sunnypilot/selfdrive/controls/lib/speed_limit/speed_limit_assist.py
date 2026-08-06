@@ -103,9 +103,8 @@ class SpeedLimitAssist:
     self._set_speed_hint_frames = -1
     self._raise_set_speed_prompted = False
     # Consent latch: the confirm press authorizes automatic speed changes for the whole
-    # engagement. Coverage gaps (pending) and handshake timeouts (inactive) re-arm to
-    # active directly instead of demanding another press; only disengagement (or turning
-    # SLA off) clears it.
+    # engagement. Coverage gaps (pending) re-cap at the next limit directly instead of
+    # demanding another press; only disengagement (or turning SLA off) clears it.
     self._pcm_long_consented = False
     self.alpha_long_offset = int(self.params.get("AlphaLongIcbmOffset", return_default=True))
     self.suggested_set_speed_conv = 0
@@ -347,14 +346,14 @@ class SpeedLimitAssist:
 
         # INACTIVE
         # BluePilot: recoverable (was a dead end until re-engagement) — a new limit re-arms the
-        # confirm handshake, or re-activates directly when consent was already given this
-        # engagement.
+        # confirm handshake. The consent latch deliberately does NOT apply here: inactive is
+        # only reachable from a preActive timeout, which can only happen before consent exists
+        # (consent transitions preActive straight to active/adapting). If a future edit makes
+        # inactive reachable post-consent — e.g. a driver opt-out — re-arming the handshake is
+        # the safe default, not an unreviewed auto-re-cap.
         elif self.state == SpeedLimitAssistState.inactive:
           if self.speed_limit_changed:
-            if self._pcm_long_consented:
-              self._update_confirmed_state()
-            else:
-              self._enter_pre_active()
+            self._enter_pre_active()
 
     # DISABLED
     elif self.state == SpeedLimitAssistState.disabled:

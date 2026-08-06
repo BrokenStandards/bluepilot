@@ -395,16 +395,6 @@ class TestSpeedLimitAssist:
     assert (EventNameSP.speedLimitActive in self.events_sp.names or
             EventNameSP.speedLimitChanged in self.events_sp.names)
 
-  def test_consent_latched_from_inactive(self):
-    # a preActive timeout after consent (e.g. re-armed by an unconsented flow) still
-    # re-activates directly on the next limit
-    self._consent_to_active()
-    self.sla.state = SpeedLimitAssistState.inactive
-
-    self.sla.update(True, False, SPEED_LIMITS['city'], 0, self.pcm_long_max_set_speed, SPEED_LIMITS['residential'],
-                    SPEED_LIMITS['residential'], True, 0, self.events_sp)
-    assert self.sla.state in ACTIVE_STATES
-
   def test_consent_cleared_on_disengagement(self):
     # disengaging ends the consent session: the next engagement confirms afresh
     self._consent_to_active()
