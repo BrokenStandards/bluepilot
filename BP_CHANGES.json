@@ -54,7 +54,8 @@
         "Fixed onroad brightness timer not expiring due to normal alerts resetting it",
         "Fixed stale scons lock and plotjuggler build issues from merge",
         "General stability improvements from upstream merge compatibility fixes",
-        "MICI: the longitudinal controller icon row could show the same icon twice — it de-duplicated by controller, but several controllers share one glyph (cruise/accel-clip, vision/map curve, stopped/model-while-stopping, brake/force-decel). The row is now keyed by glyph, so an icon can occupy only one slot and merged controllers report their combined contribution"
+        "MICI: the longitudinal controller icon row could show the same icon twice — it de-duplicated by controller, but several controllers share one glyph (cruise/accel-clip, vision/map curve, stopped/model-while-stopping, brake/force-decel). The row is now keyed by glyph, so an icon can occupy only one slot and merged controllers report their combined contribution",
+        "Speed Limit Assist: the held-limit cap is now scoped to the engagement that established it — it bridges coverage gaps while engaged, but is dropped on disengagement so an arbitrarily old limit can never be re-offered for confirmation, or re-imposed, later in the drive. Adopting a stale limit now uses the downbeat chime rather than the confident one, the held cap follows offset/unit changes made while holding, and the loss also flashes the speed sign"
       ],
       "removals": [
         "Removed rainbow/circle shaders from stock shader_polygon.py (preserved in BP module)",

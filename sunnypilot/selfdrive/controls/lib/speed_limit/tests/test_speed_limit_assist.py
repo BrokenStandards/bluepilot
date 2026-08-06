@@ -377,23 +377,36 @@ class TestSpeedLimitAssist:
                     SPEED_LIMITS['city'], True, 0, self.events_sp)
     assert self.sla.state == SpeedLimitAssistState.active
 
-  def test_consent_latched_through_limit_gap(self):
-    # once the driver consents, a map-coverage gap must not demand another press: the
-    # reacquired limit re-caps directly with the chime, never the preActive prompt
+  def test_coverage_gap_never_demands_another_press(self):
+    # a map-coverage gap must not demand another press. The limit is now held rather than
+    # released, so SLA never even leaves active — it keeps capping at the held value and
+    # re-adopts the new limit silently when data returns.
     self._consent_to_active()
 
-    # coverage gap outlasting the resolver hold
-    self.sla.update(True, False, SPEED_LIMITS['city'], 0, self.pcm_long_max_set_speed, 0, 0, False, 0, self.events_sp)
-    assert self.sla.state == SpeedLimitAssistState.pending
+    # gap: the resolver holds the limit and flags it stale, has_speed_limit stays True
+    for _ in range(int(2. / DT_MDL)):
+      self.sla.update(True, False, SPEED_LIMITS['city'], 0, self.pcm_long_max_set_speed, 0,
+                      SPEED_LIMITS['city'], True, 0, self.events_sp, True)
+    assert self.sla.state in ACTIVE_STATES
+    assert self.sla.output_v_target == SPEED_LIMITS['city']  # still capped, never released
 
     self.events_sp.clear()
     self.sla.update(True, False, SPEED_LIMITS['city'], 0, self.pcm_long_max_set_speed, SPEED_LIMITS['highway'],
-                    SPEED_LIMITS['highway'], True, 0, self.events_sp)
-    assert self.sla.state == SpeedLimitAssistState.active
+                    SPEED_LIMITS['highway'], True, 0, self.events_sp, False)
+    assert self.sla.state in ACTIVE_STATES
     assert self.sla.output_v_target == SPEED_LIMITS['highway']
     assert EventNameSP.speedLimitPreActive not in self.events_sp.names
-    assert (EventNameSP.speedLimitActive in self.events_sp.names or
-            EventNameSP.speedLimitChanged in self.events_sp.names)
+
+  def test_consent_latch_recaps_from_pending(self):
+    # pending is only reachable mid-engagement if the hold is ever bounded; the latch is what
+    # keeps that from re-nagging, so pin its behaviour directly
+    self._consent_to_active()
+    self.sla.state = SpeedLimitAssistState.pending
+    self.events_sp.clear()
+    self.sla.update(True, False, SPEED_LIMITS['city'], 0, self.pcm_long_max_set_speed, SPEED_LIMITS['highway'],
+                    SPEED_LIMITS['highway'], True, 0, self.events_sp)
+    assert self.sla.state in ACTIVE_STATES
+    assert EventNameSP.speedLimitPreActive not in self.events_sp.names
 
   def test_consent_cleared_on_disengagement(self):
     # disengaging ends the consent session: the next engagement confirms afresh
@@ -580,3 +593,31 @@ class TestSpeedLimitAssist:
                     SPEED_LIMITS['city'], True, 0, self.events_sp, True)
     assert not self.sla.is_active
     assert EventNameSP.speedLimitLost not in self.events_sp.names
+
+  def test_stale_chime_rearms_after_disengagement(self):
+    # review finding: _stale_announced latched across a disengage, so re-engaging onto a still
+    # stale limit was silent — and worse, announced with the CONFIDENT chime
+    self._consent_to_active()
+    self.sla.update(True, False, SPEED_LIMITS['city'], 0, self.pcm_long_max_set_speed, 0,
+                    SPEED_LIMITS['city'], True, 0, self.events_sp, True)
+    assert EventNameSP.speedLimitLost in self.events_sp.names
+
+    # disengage: SLA leaves the active states
+    self.sla.update(False, False, SPEED_LIMITS['city'], 0, self.pcm_long_max_set_speed, 0,
+                    SPEED_LIMITS['city'], True, 0, self.events_sp, True)
+    assert not self.sla.is_active
+    assert not self.sla._stale_announced  # re-armed
+
+  def test_activating_onto_a_stale_limit_uses_the_downbeat_chime(self):
+    # the confident chime must not play while a stale cap is being (re-)imposed
+    self.sla.state = SpeedLimitAssistState.preActive
+    self.press_cruise_button()
+    self.events_sp.clear()
+    self.sla.update(True, False, SPEED_LIMITS['city'], 0, self.pcm_long_max_set_speed, 0,
+                    SPEED_LIMITS['city'], True, 0, self.events_sp, True)
+    assert self.sla.state in ACTIVE_STATES
+    assert EventNameSP.speedLimitLost in self.events_sp.names
+    assert EventNameSP.speedLimitActive not in self.events_sp.names
+    assert EventNameSP.speedLimitChanged not in self.events_sp.names
+    # and only once: the post-activation block must not re-add it
+    assert self.events_sp.names.count(EventNameSP.speedLimitLost) == 1

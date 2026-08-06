@@ -76,6 +76,7 @@ class LongitudinalPlannerSP:
 
     self.output_v_target = 0.
     self.output_a_target = 0.
+    self._long_enabled_prev = False
 
   def is_e2e(self, sm: messaging.SubMaster) -> bool:
     experimental_mode = sm['selfdriveState'].experimentalMode
@@ -103,6 +104,13 @@ class LongitudinalPlannerSP:
 
     # Smart Cruise Control
     self.scc.update(sm, long_enabled, long_override, v_ego, a_ego, v_cruise)
+
+    # BluePilot: the held-limit cap belongs to the engagement that established it. Dropping it on
+    # disengagement bounds how stale a held limit can get — otherwise a limit resolved at the start
+    # of a drive would still be offered for confirmation, and re-imposed, hours and miles later.
+    if not long_enabled and self._long_enabled_prev:
+      self.resolver.reset_hold()
+    self._long_enabled_prev = long_enabled
 
     # Speed Limit Resolver
     self.resolver.update(v_ego, sm)

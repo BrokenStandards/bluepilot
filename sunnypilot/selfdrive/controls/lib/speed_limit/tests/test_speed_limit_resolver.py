@@ -14,7 +14,8 @@ from cereal import custom
 from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit import LIMIT_MAX_MAP_DATA_AGE
 
 from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit.speed_limit_resolver import SpeedLimitResolver, ALL_SOURCES
-from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit.common import Policy
+from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit.common import OffsetType, Policy
+from openpilot.common.constants import CV
 
 SpeedLimitSource = custom.LongitudinalPlanSP.SpeedLimit.Source
 
@@ -232,6 +233,32 @@ class TestSpeedLimitResolverLastLimitHold:
     assert resolver.speed_limit_last_valid
     assert resolver.speed_limit_stale
     assert not resolver.speed_limit_valid  # live data is gone: the sign greys the numeral
+
+  def test_reset_hold_drops_the_held_limit(self, resolver_class, mocker: MockerFixture):
+    # the hold bridges gaps within an engagement; it must not outlive it, or the next engagement
+    # would offer an arbitrarily old limit for confirmation as if it were fresh
+    resolver, sm_mock = self._make_resolver_with_limit(resolver_class, mocker)
+    self._run_gap_frames(resolver, sm_mock, 240)
+    assert resolver.speed_limit_stale and resolver.speed_limit_last_valid
+
+    resolver.reset_hold()
+    assert resolver.speed_limit_last == 0.
+    assert resolver.speed_limit_final_last == 0.
+    assert not resolver.speed_limit_last_valid
+    assert not resolver.speed_limit_stale
+
+  def test_held_limit_follows_offset_changes(self, resolver_class, mocker: MockerFixture):
+    # the enforced cap would otherwise stay frozen with whatever offset applied when the limit
+    # was last live, and the hold is no longer bounded by 10 s
+    resolver, sm_mock = self._make_resolver_with_limit(resolver_class, mocker)
+    self._run_gap_frames(resolver, sm_mock, 240)
+    assert resolver.speed_limit_final_last == 25.
+
+    resolver.offset_type = OffsetType.fixed
+    resolver.offset_value = 5
+    resolver.is_metric = True
+    self._run_gap_frames(resolver, sm_mock, 1)
+    assert resolver.speed_limit_final_last == pytest.approx(25. + 5 * CV.KPH_TO_MS)
 
   def test_stale_clears_when_data_returns(self, resolver_class, mocker: MockerFixture):
     resolver, sm_mock = self._make_resolver_with_limit(resolver_class, mocker)

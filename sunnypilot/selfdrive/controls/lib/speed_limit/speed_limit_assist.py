@@ -154,7 +154,13 @@ class SpeedLimitAssist:
     return bool(self.v_cruise_cluster_conv < CONFIRM_SPEED_THRESHOLD[self.is_metric])
 
   def update_active_event(self, events_sp: EventsSP) -> None:
-    if self.v_cruise_cluster_below_confirm_speed_threshold:
+    # BluePilot: adopting a limit we can no longer see is not a confident event — announce it with
+    # the downbeat chime instead. This also keeps the two from being emitted on the same frame,
+    # where the AlertManager would play only one of them and drop the other.
+    if self._speed_limit_stale:
+      events_sp.add(EventNameSP.speedLimitLost)
+      self._stale_announced = True
+    elif self.v_cruise_cluster_below_confirm_speed_threshold:
       events_sp.add(EventNameSP.speedLimitChanged)
     else:
       events_sp.add(EventNameSP.speedLimitActive)
@@ -327,8 +333,13 @@ class SpeedLimitAssist:
 
         # PENDING
         # BluePilot: with consent already given this engagement, a reacquired limit re-caps
-        # directly (chime + sign flash) — re-confirming through every map-coverage gap would
-        # nag the driver for a decision they already made.
+        # directly (chime + sign flash) — re-confirming through every map-coverage gap would nag
+        # the driver for a decision they already made.
+        # Currently unreachable while consented: holding a lost limit keeps has_speed_limit True
+        # for the whole engagement, so active/adapting never fall back here, and the only other
+        # way in (from disabled) clears the latch. It is kept deliberately rather than deleted as
+        # dead code — bounding the hold (an outer timeout, a road-change signal) makes pending
+        # reachable mid-engagement again, and this is the branch that keeps that from re-nagging.
         elif self.state == SpeedLimitAssistState.pending:
           if self.speed_limit_changed:
             if self._pcm_long_consented:
@@ -484,16 +495,6 @@ class SpeedLimitAssist:
     if self.state == SpeedLimitAssistState.pending and self._state_prev != SpeedLimitAssistState.pending:
       events_sp.add(EventNameSP.speedLimitPending)
 
-    # BluePilot: confidence in the held limit is gone — one downbeat chime, then silence until
-    # real data returns. Only while actively capping: announcing a stale limit SLA is not
-    # enforcing would be noise.
-    if self._speed_limit_stale and self.is_active:
-      if not self._stale_announced:
-        events_sp.add(EventNameSP.speedLimitLost)
-        self._stale_announced = True
-    elif not self._speed_limit_stale:
-      self._stale_announced = False
-
     if self.pcm_op_long:
       self._update_pcm_long_prompts(events_sp)
 
@@ -514,6 +515,17 @@ class SpeedLimitAssist:
             self.update_active_event(events_sp)
     else:
       self._last_event_limit_conv = 0
+
+    # BluePilot: confidence in the held limit is gone — one downbeat chime, then silence until
+    # real data returns. Only while actively capping: announcing a stale limit SLA is not
+    # enforcing would be noise. Re-arms whenever we stop capping on a stale limit, so a later
+    # engagement that re-imposes one announces itself rather than staying silent. Runs after the
+    # activation events so update_active_event's own downbeat isn't duplicated on that frame.
+    if not self._speed_limit_stale or not self.is_active:
+      self._stale_announced = False
+    elif not self._stale_announced:
+      events_sp.add(EventNameSP.speedLimitLost)
+      self._stale_announced = True
 
   def update(self, long_enabled: bool, long_override: bool, v_ego: float, a_ego: float, v_cruise_cluster: float, speed_limit: float,
              speed_limit_final_last: float, has_speed_limit: bool, distance: float, events_sp: EventsSP,

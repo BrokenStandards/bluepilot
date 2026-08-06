@@ -51,7 +51,7 @@ SCC_VISION_ACTIVE_STATES = (VisionState.entering, VisionState.turning, VisionSta
 
 # selfdriveState.alertType is "<EventName>/<eventType>"; these are the chime-only speed
 # limit adjust alerts whose visual is this widget's flash.
-SLA_FLASH_EVENTS = ('speedLimitActive', 'speedLimitChanged', 'speedLimitPending')
+SLA_FLASH_EVENTS = ('speedLimitActive', 'speedLimitChanged', 'speedLimitPending', 'speedLimitLost')
 
 FLASH_DURATION = 5.0  # s, matches the old text alert / chime alert duration
 PARAM_REFRESH_FRAMES = 60

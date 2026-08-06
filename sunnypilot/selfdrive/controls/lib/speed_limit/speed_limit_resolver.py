@@ -91,8 +91,13 @@ class SpeedLimitResolver:
       # BluePilot: past the grace period the last limit is KEPT rather than zeroed. Zeroing made
       # SLA release the cap, which snapped the car back up to the cruise set speed on every OSM
       # hole. The limit is instead flagged stale: the driver gets one downbeat chime and the sign
-      # greys its numeral, and the cap stays until real data replaces it.
+      # greys its numeral, and the cap stays until real data replaces it or the drive ends
+      # (reset_hold on disengagement bounds how old the held limit can get).
       self.speed_limit_stale = self.speed_limit_last > 0.
+      if self.speed_limit_stale:
+        # keep honouring offset/unit changes made while holding — the enforced cap would
+        # otherwise stay frozen with whatever offset applied when the limit was last live
+        self.speed_limit_final_last = self.speed_limit_last + self._get_speed_limit_offset(self.speed_limit_last)
 
   @property
   def speed_limit_valid(self) -> bool:
@@ -109,15 +114,25 @@ class SpeedLimitResolver:
       self.offset_type = self.params.get("SpeedLimitOffsetType", return_default=True)
       self.offset_value = self.params.get("SpeedLimitValueOffset", return_default=True)
 
-  def _get_speed_limit_offset(self) -> float:
+  def _get_speed_limit_offset(self, speed_limit: float) -> float:
+    # BluePilot: takes the limit rather than reading self.speed_limit, so the held limit's offset
+    # can be re-derived while live data is gone (a percentage offset needs the limit it applies to)
     if self.offset_type == OffsetType.off:
       return 0
     elif self.offset_type == OffsetType.fixed:
       return float(self.offset_value * (CV.KPH_TO_MS if self.is_metric else CV.MPH_TO_MS))
     elif self.offset_type == OffsetType.percentage:
-      return float(self.offset_value * 0.01 * self.speed_limit)
+      return float(self.offset_value * 0.01 * speed_limit)
     else:
       raise NotImplementedError("Offset not supported")
+
+  def reset_hold(self) -> None:
+    """Drop the held limit. The hold bridges gaps within an engagement; it must not outlive it,
+    or the next engagement would offer an arbitrarily old limit for confirmation as if fresh."""
+    self.speed_limit_last = 0.
+    self.speed_limit_final_last = 0.
+    self._last_limit_hold_frames = 0
+    self.speed_limit_stale = False
 
   def _reset_limit_sources(self, source: custom.LongitudinalPlanSP.SpeedLimit.Source) -> None:
     self.limit_solutions[source] = 0.
@@ -201,7 +216,7 @@ class SpeedLimitResolver:
     self.update_params()
 
     self.speed_limit, self.distance, self.source = self._resolve_limit_sources(sm)
-    self.speed_limit_offset = self._get_speed_limit_offset()
+    self.speed_limit_offset = self._get_speed_limit_offset(self.speed_limit)
 
     self.update_speed_limit_states()
 
