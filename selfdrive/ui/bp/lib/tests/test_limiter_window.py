@@ -2,7 +2,7 @@
 
 from openpilot.selfdrive.ui.bp.lib.limiter_window import (
   BRAKE_CONTROLLER, ContributionWindow, PrimaryLimiter, SAMPLE_DT, icon_key,
-  ICON_BRAKE, ICON_CRUISE, ICON_CURVE, ICON_LEAD, ICON_MODEL, ICON_NONE, ICON_STOP)
+  ICON_BRAKE, ICON_CRUISE, ICON_CURVE, ICON_FORCE_DECEL, ICON_LEAD, ICON_MODEL, ICON_NONE, ICON_STOP)
 
 CRUISE = PrimaryLimiter.cruise
 CLIP = PrimaryLimiter.accelClip
@@ -33,7 +33,7 @@ def fill(win, start, seconds, controller, accel=0.0):
 
 
 def glyphs(groups):
-  return [glyph for glyph, _ in groups]
+  return [glyph for glyph, _, _ in groups]
 
 
 class TestIconKey:
@@ -45,8 +45,12 @@ class TestIconKey:
   def test_vision_and_map_share_the_curve_triangle(self):
     assert icon_key(VISION) == icon_key(MAP) == ICON_CURVE
 
-  def test_brake_and_force_decel_share_the_brake_text(self):
-    assert icon_key(BRAKE_CONTROLLER) == icon_key(FORCE_DECEL) == ICON_BRAKE
+  def test_force_decel_is_not_the_drivers_brake(self):
+    # forceDecel is driver-monitoring timeout or a fault soft-disabling — the system
+    # overriding the driver, the opposite of the driver braking. Distinct glyphs.
+    assert icon_key(BRAKE_CONTROLLER) == ICON_BRAKE
+    assert icon_key(FORCE_DECEL) == ICON_FORCE_DECEL
+    assert icon_key(BRAKE_CONTROLLER) != icon_key(FORCE_DECEL)
 
   def test_model_shares_the_octagon_only_while_stopping(self):
     assert icon_key(MODEL, model_stopping=True) == icon_key(STOPPED) == ICON_STOP
@@ -88,9 +92,10 @@ class TestContributionWindow:
     win = ContributionWindow()
     t = fill(win, 0.0, 1.0, VISION, accel=-1.0)
     t = fill(win, t, 1.0, MAP, accel=-0.5)
-    (glyph, net), = win.ranked_groups(t, key_driving)
+    (glyph, net, members), = win.ranked_groups(t, key_driving)
     assert glyph == ICON_CURVE
     assert abs(net - (-1.5)) < 0.11
+    assert members == frozenset({VISION, MAP})
 
   def test_merged_group_outranks_a_larger_single_controller(self):
     # two curve controllers at 0.6 each beat a lead at 1.0 once merged
@@ -118,7 +123,7 @@ class TestContributionWindow:
     win = ContributionWindow()
     t = fill(win, 0.0, 1.0, MODEL, accel=-2.0)
     t = fill(win, t, 1.0, MODEL, accel=1.0)
-    (glyph, net), = win.ranked_groups(t, key_driving)
+    (glyph, net, _), = win.ranked_groups(t, key_driving)
     assert glyph == ICON_MODEL
     assert abs(net - (-1.0)) < 0.11
 
@@ -126,7 +131,7 @@ class TestContributionWindow:
     win = ContributionWindow()
     t = fill(win, 0.0, 1.0, MODEL, accel=1.0)
     t = fill(win, t, 1.0, MODEL, accel=-1.0)
-    (_, net), = win.ranked_groups(t, key_driving)
+    (_, net, _), = win.ranked_groups(t, key_driving)
     assert abs(net) < 0.11
 
   def test_window_expiry(self):
@@ -157,3 +162,14 @@ class TestContributionWindow:
     t = fill(win, 0.0, 1.0, LEAD, accel=-1.0)
     win.clear()
     assert win.ranked_groups(t, key_driving) == []
+
+  def test_members_name_the_controllers_behind_a_merged_icon(self):
+    # the curve badges read these to say whether vision, map, or both are contributing
+    win = ContributionWindow()
+    t = fill(win, 0.0, 1.0, VISION, accel=-1.0)
+    (_, _, members), = win.ranked_groups(t, key_driving)
+    assert members == frozenset({VISION})
+
+    t = fill(win, t, 1.0, MAP, accel=-1.0)
+    (_, _, members), = win.ranked_groups(t, key_driving)
+    assert members == frozenset({VISION, MAP})

@@ -27,13 +27,14 @@ SAMPLE_DT = 0.05  # 20 Hz plan cadence
 BRAKE_CONTROLLER = 1000
 
 # Glyph identities. Controllers sharing one are one icon in the row.
-ICON_BRAKE = 'brake'    # BRAKE text
-ICON_STOP = 'stop'      # stop octagon
-ICON_MODEL = 'model'    # experimental flask
-ICON_CURVE = 'curve'    # curve warning triangle
-ICON_LEAD = 'lead'      # following-distance circle
-ICON_CRUISE = 'cruise'  # dashboard cruise gauge
-ICON_NONE = ''          # draws nothing
+ICON_BRAKE = 'brake'              # BRAKE text — the driver's own braking
+ICON_FORCE_DECEL = 'forcedecel'   # (!) — the system forcing the car down, not the driver
+ICON_STOP = 'stop'                # stop octagon
+ICON_MODEL = 'model'              # experimental flask
+ICON_CURVE = 'curve'              # curve warning triangle
+ICON_LEAD = 'lead'                # following-distance circle
+ICON_CRUISE = 'cruise'            # dashboard cruise gauge
+ICON_NONE = ''                    # draws nothing
 
 
 def icon_key(controller: int, model_stopping: bool = False) -> str:
@@ -42,9 +43,17 @@ def icon_key(controller: int, model_stopping: bool = False) -> str:
   Speed Limit Assist deliberately has no glyph — the speed limit sign is its indication.
   The model's glyph depends on intent: it shares the octagon while planning a stop,
   otherwise it is the experimental flask.
+
+  forceDecel is deliberately NOT the driver's BRAKE glyph. It is set only by driver
+  monitoring reaching its top alert level or by selfdrive soft-disabling on a fault
+  (controlsd.py: forceDecel = alertLevel three or state softDisabling), and it forces
+  v_cruise to 0 — the system overriding the driver, which is the opposite of the driver
+  braking. Showing them as one icon would misattribute the cause.
   """
-  if controller in (BRAKE_CONTROLLER, PrimaryLimiter.forceDecel):
+  if controller == BRAKE_CONTROLLER:
     return ICON_BRAKE
+  if controller == PrimaryLimiter.forceDecel:
+    return ICON_FORCE_DECEL
   if controller == PrimaryLimiter.stopped:
     return ICON_STOP
   if controller == PrimaryLimiter.model:
@@ -88,22 +97,24 @@ class ContributionWindow:
       sums[controller] = (gross + abs(accel) * SAMPLE_DT, net + accel * SAMPLE_DT)
     return sums
 
-  def ranked_groups(self, now: float, key: Callable[[int], str]) -> list[tuple[str, float]]:
-    """[(glyph, net delta-v)] ranked by summed gross contribution, biggest first.
+  def ranked_groups(self, now: float, key: Callable[[int], str]) -> list[tuple[str, float, frozenset[int]]]:
+    """[(glyph, net delta-v, member controllers)] ranked by summed gross, biggest first.
 
     Controllers whose key is '' (no glyph) and groups with no contribution are dropped.
-    One entry per glyph, so the caller can never draw the same icon twice.
+    One entry per glyph, so the caller can never draw the same icon twice. The members
+    let the caller annotate a merged icon with which controllers are behind it.
     """
     self.prune(now)
 
-    groups: dict[str, list[float]] = {}  # glyph -> [gross, net]
+    groups: dict[str, list] = {}  # glyph -> [gross, net, members]
     for controller, (gross, net) in self._sums().items():
       glyph = key(controller)
       if not glyph:
         continue
-      group = groups.setdefault(glyph, [0.0, 0.0])
+      group = groups.setdefault(glyph, [0.0, 0.0, set()])
       group[0] += gross
       group[1] += net
+      group[2].add(controller)
 
     ranked = sorted(groups.items(), key=lambda kv: kv[1][0], reverse=True)
-    return [(glyph, net) for glyph, (gross, net) in ranked if gross > 0.0]
+    return [(glyph, net, frozenset(members)) for glyph, (gross, net, members) in ranked if gross > 0.0]

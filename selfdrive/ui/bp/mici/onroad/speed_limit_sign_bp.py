@@ -35,7 +35,7 @@ from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.common.params import Params
 from openpilot.selfdrive.ui.bp.lib.limiter_window import (
   BRAKE_CONTROLLER, ContributionWindow, icon_key,
-  ICON_BRAKE, ICON_CRUISE, ICON_CURVE, ICON_LEAD, ICON_MODEL, ICON_STOP)
+  ICON_BRAKE, ICON_CRUISE, ICON_CURVE, ICON_FORCE_DECEL, ICON_LEAD, ICON_MODEL, ICON_STOP)
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.system.ui.lib.application import gui_app, FontWeight
 from openpilot.system.ui.lib.text_measure import measure_text_cached
@@ -82,6 +82,14 @@ ICON_ROW_H = 60
 ICON_SLOT_W = 56
 ICON_R = 24              # icon half-size: every icon is 2r = 48px (home-screen flask size)
 BRAKE_FONT_SIZE = 20     # widest label that fits the slot; "BRAKE" is text by design
+
+# TEMPORARY (diagnostic): vision and map curve control share the curve triangle, so a small
+# eye / map-pin badge above it names which source is actually contributing. Remove once the
+# split-vs-merge question is settled. Hand-drawn: there is no map/pin asset anywhere in
+# selfdrive/assets, and the eye assets are unfetched LFS pointers that already mean
+# "driver monitoring" elsewhere in MICI.
+CURVE_BADGE_R = 7
+CURVE_BADGE_GAP = 3
 CONTRIB_FULL_DV = 1.5    # m/s net delta-v for full color saturation
 CONTRIB_PX_PER_DV = 8.0  # vertical px per m/s net delta-v (accel raises, decel lowers)
 CONTRIB_MAX_OFFSET = 12.0
@@ -130,7 +138,8 @@ class MiciSpeedLimitSign(Widget):
     self._current_controller: int | None = None
     self._model_stopping = False
     self._target_value: float | None = None  # display units
-    self._slots: list[tuple[str, float] | None] = [None, None, None]  # (glyph, net_dv)
+    # (glyph, net_dv, member controllers)
+    self._slots: list[tuple[str, float, frozenset[int]] | None] = [None, None, None]
 
     # the transient set-speed readout owns the top-left corner; the sign yields to it
     self._top_icons_active = False
@@ -250,10 +259,10 @@ class MiciSpeedLimitSign(Widget):
     current = self._current_controller
     current_glyph = self._icon_key(current) if current is not None else ''
 
-    slots: list[tuple[str, float] | None] = [None, None, None]
+    slots: list[tuple[str, float, frozenset[int]] | None] = [None, None, None]
     if current_glyph:
-      net = next((n for glyph, n in groups if glyph == current_glyph), 0.0)
-      slots[0] = (current_glyph, net)
+      slots[0] = next((g for g in groups if g[0] == current_glyph),
+                      (current_glyph, 0.0, frozenset({current})))
     for i, group in enumerate([g for g in groups if g[0] != current_glyph][:2]):
       slots[i + 1] = group
     self._slots = slots
@@ -376,15 +385,17 @@ class MiciSpeedLimitSign(Widget):
     for i, slot in enumerate(self._slots):
       if slot is None:
         continue
-      glyph, net_dv = slot
+      glyph, net_dv, members = slot
       tint, dy = self._contrib_style(net_dv, alpha)
       icon_cx = row_left + (i + 0.5) * ICON_SLOT_W
-      self._draw_icon(glyph, icon_cx, row_cy + dy, ICON_R, tint, alpha)
+      self._draw_icon(glyph, icon_cx, row_cy + dy, ICON_R, tint, alpha, members)
 
   def _draw_icon(self, glyph: str, cx: float, cy: float, r: float,
-                 tint: rl.Color, alpha: float) -> None:
+                 tint: rl.Color, alpha: float, members: frozenset[int] = frozenset()) -> None:
     if glyph == ICON_BRAKE:
       self._draw_text_centered(self._font_bold, "BRAKE", BRAKE_FONT_SIZE, cx, cy, tint)
+    elif glyph == ICON_FORCE_DECEL:
+      self._draw_force_decel(cx, cy, r, tint)
     elif glyph == ICON_STOP:
       self._draw_octagon(cx, cy, r, tint, alpha)
     elif glyph == ICON_MODEL:
@@ -393,6 +404,7 @@ class MiciSpeedLimitSign(Widget):
       rl.draw_texture_ex(self._experimental_tex, pos, 0.0, scale, tint)
     elif glyph == ICON_CURVE:
       self._draw_curve_triangle(cx, cy, r, tint)
+      self._draw_curve_source_badges(cx, cy, r, tint, members)
     elif glyph == ICON_LEAD:
       self._draw_following_distance(cx, cy, r, tint)
     elif glyph == ICON_CRUISE:
@@ -411,6 +423,38 @@ class MiciSpeedLimitSign(Widget):
     for a, b in ((top, left), (left, right), (right, top)):
       rl.draw_line_ex(a, b, 4, tint)
     rl.draw_ring(rl.Vector2(cx - r * 0.25, cy + r * 0.55), r * 0.35, r * 0.55, 270, 360, 10, tint)
+
+  def _draw_force_decel(self, cx: float, cy: float, r: float, tint: rl.Color) -> None:
+    # (!) — the system forcing the car down (driver monitoring timeout or a fault
+    # soft-disabling), deliberately distinct from the driver's own BRAKE
+    center = rl.Vector2(cx, cy)
+    rl.draw_ring(center, r - 3.5, r, 0, 360, 24, tint)
+    bar_w, bar_top, bar_bot = 3.5, cy - r * 0.45, cy + r * 0.18
+    rl.draw_rectangle_rounded(rl.Rectangle(cx - bar_w / 2, bar_top, bar_w, bar_bot - bar_top), 0.5, 4, tint)
+    rl.draw_circle(int(cx), int(cy + r * 0.42), bar_w / 2, tint)
+
+  def _draw_curve_source_badges(self, cx: float, cy: float, r: float, tint: rl.Color,
+                                members: frozenset[int]) -> None:
+    """TEMPORARY: name which curve controller is behind the shared triangle."""
+    badges = [glyph for controller, glyph in
+              ((PrimaryLimiter.sccVision, 'eye'), (PrimaryLimiter.sccMap, 'map'))
+              if controller in members]
+    if not badges:
+      return
+
+    span = len(badges) * 2 * CURVE_BADGE_R + (len(badges) - 1) * CURVE_BADGE_GAP
+    bx = cx - span / 2 + CURVE_BADGE_R
+    by = cy - r - CURVE_BADGE_R - 1
+    for badge in badges:
+      if badge == 'eye':
+        rl.draw_ellipse_lines(int(bx), int(by), CURVE_BADGE_R, CURVE_BADGE_R * 0.62, tint)
+        rl.draw_circle(int(bx), int(by), CURVE_BADGE_R * 0.3, tint)
+      else:
+        head_r = CURVE_BADGE_R * 0.62
+        head_cy = by - CURVE_BADGE_R * 0.28
+        rl.draw_circle(int(bx), int(head_cy), head_r, tint)
+        rl.draw_poly(rl.Vector2(bx, head_cy + head_r * 0.75), 3, head_r * 0.95, 90, tint)
+      bx += 2 * CURVE_BADGE_R + CURVE_BADGE_GAP
 
   def _draw_following_distance(self, cx: float, cy: float, r: float, tint: rl.Color) -> None:
     # two cars in a circle: keep-your-distance
