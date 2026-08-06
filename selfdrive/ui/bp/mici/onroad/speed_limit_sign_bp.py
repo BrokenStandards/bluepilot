@@ -10,8 +10,9 @@ The longitudinal target lives at the bottom center, over the steering torque cur
 text, with up to three road-sign icons above it naming the longitudinal controllers.
 Leftmost is the current controller; the two slots right of it are the largest
 contributors over a rolling window (BPLimiterWindow, 0-5 s) ranked by gross |accel|
-contribution. All icons are the same size — the experimental flask matches its
-home-screen size. Icon language:
+contribution. All icons are the same 48px size, matching the experimental flask on the
+home screen. The sign yields to the transient set-speed readout that owns the top-left
+corner (same protocol as the DM face). Icon language:
   curve triangle = vision/map curve control     octagon = stopped / model stop intent
   following-distance circle = lead              gauge = cruise set speed / accel schedule
   experimental flask = e2e model                BRAKE = manual braking
@@ -65,15 +66,21 @@ MUTCD_W = 60
 MUTCD_H = 78
 VIENNA_RADIUS = 37
 
+# Underglow radius: the sign sits ~4px from the DM face above and the powerflow arc
+# below, so the flash must decay before it reaches them (they are ~43px from center)
+GLOW_RADIUS = 50
+
 # Bottom-center target cluster, aligned with the torque bar's arc center
 TORQUE_CENTER_OFFSET_X = 8   # torque bar draws 8px right of the camera-feed center
 TARGET_FONT_SIZE = 54
 TARGET_BOTTOM_MARGIN = 16
 TARGET_ICON_GAP = 6
+TARGET_SHADOW_DEPTH = 3      # black rim so white digits survive the white torque-bar fill
 
 ICON_ROW_H = 60
 ICON_SLOT_W = 56
-ICON_R = 21              # icon half-size; experimental texture = 2r + 6 = 48px (home-screen size)
+ICON_R = 24              # icon half-size: every icon is 2r = 48px (home-screen flask size)
+BRAKE_FONT_SIZE = 20     # widest label that fits the slot; "BRAKE" is text by design
 CONTRIB_FULL_DV = 1.5    # m/s net delta-v for full color saturation
 CONTRIB_PX_PER_DV = 8.0  # vertical px per m/s net delta-v (accel raises, decel lowers)
 CONTRIB_MAX_OFFSET = 12.0
@@ -99,7 +106,7 @@ class MiciSpeedLimitSign(Widget):
     self._font_bold = gui_app.font(FontWeight.BOLD)
     self._font_semi_bold = gui_app.font(FontWeight.SEMI_BOLD)
 
-    self._experimental_tex = gui_app.texture('icons_mici/experimental_mode.png', 2 * ICON_R + 6, 2 * ICON_R + 6)
+    self._experimental_tex = gui_app.texture('icons_mici/experimental_mode.png', 2 * ICON_R, 2 * ICON_R)
 
     self._alpha_filter = FirstOrderFilter(0.0, 0.1, 1 / gui_app.target_fps)
     self._target_alpha_filter = FirstOrderFilter(0.0, 0.1, 1 / gui_app.target_fps)
@@ -123,6 +130,12 @@ class MiciSpeedLimitSign(Widget):
     self._model_stopping = False
     self._target_value: float | None = None  # display units
     self._slots: list[tuple[int, float] | None] = [None, None, None]  # (controller, net_dv)
+
+    # the transient set-speed readout owns the top-left corner; the sign yields to it
+    self._top_icons_active = False
+
+  def set_top_icons_active(self, active: bool) -> None:
+    self._top_icons_active = active
 
   def _read_window_param(self) -> float:
     try:
@@ -166,6 +179,22 @@ class MiciSpeedLimitSign(Widget):
       self._window.set_window(self._read_window_param())
 
     sm = ui_state.sm
+
+    # everything below reads longitudinalPlanSP; at the start of a new drive the last
+    # message SubMaster holds is the previous drive's — show nothing until fresh data
+    if sm.recv_frame['longitudinalPlanSP'] < ui_state.started_frame:
+      self._speed_limit = 0.0
+      self._speed_limit_valid = False
+      self._has_limit = False
+      self._flash_until = 0.0
+      self._alert_flash = False
+      self._curve_active_prev = False
+      self._window.clear()
+      self._current_controller = None
+      self._target_value = None
+      self._slots = [None, None, None]
+      return
+
     lp_sp = sm['longitudinalPlanSP']
     lp = sm['longitudinalPlan']
     resolver = lp_sp.speedLimit.resolver
@@ -195,13 +224,6 @@ class MiciSpeedLimitSign(Widget):
 
     # controller telemetry
     self._engaged = sm['carControl'].enabled
-    if sm.recv_frame['longitudinalPlanSP'] < ui_state.started_frame:
-      self._window.clear()
-      self._current_controller = None
-      self._target_value = None
-      self._slots = [None, None, None]
-      return
-
     self._model_stopping = bool(lp.shouldStop)
     target_ms = self._limiter_target_ms(sm, lp_sp, lp) if self._engaged else None
     self._target_value = target_ms * self._speed_conv if target_ms is not None else None
@@ -240,11 +262,11 @@ class MiciSpeedLimitSign(Widget):
     # keep clear of visible (non-chime) alerts, which own the top of the screen
     alert_showing = ui_state.sm['selfdriveState'].alertSize != 0
 
-    show_limit = (ui_state.started and not alert_showing and
+    # the sign yields to the transient set-speed readout, like the DM face does
+    show_limit = (ui_state.started and not alert_showing and not self._top_icons_active and
                   self._has_limit and self._speed_limit > 0 and (self._persistent or self._flashing))
-    has_slots = any(slot is not None for slot in self._slots)
     show_target = (ui_state.started and not alert_showing and self._icons_enabled and
-                   (self._target_value is not None or has_slots))
+                   self._target_value is not None)
 
     alpha = self._alpha_filter.update(1.0 if show_limit else 0.0)
     if alpha >= 1e-2:
@@ -264,7 +286,7 @@ class MiciSpeedLimitSign(Widget):
   def _draw_underglow(self, cx: float, cy: float, alpha: float) -> None:
     pulse = 0.45 + 0.55 * abs(math.sin(time.monotonic() * math.pi * 1.5))
     color = rl.Color(GLOW_LIMIT.r, GLOW_LIMIT.g, GLOW_LIMIT.b, int(200 * pulse * alpha))
-    rl.draw_circle_gradient(rl.Vector2(cx, cy), MUTCD_H * 0.85, color, rl.BLANK)
+    rl.draw_circle_gradient(rl.Vector2(cx, cy), GLOW_RADIUS, color, rl.BLANK)
 
   def _value_text_color(self, alpha: float) -> rl.Color:
     is_overspeed = self._has_limit and round(self._speed_limit_final_last) < round(self._speed)
@@ -316,8 +338,16 @@ class MiciSpeedLimitSign(Widget):
 
     text_top = rect.y + rect.height - TARGET_BOTTOM_MARGIN - TARGET_FONT_SIZE
     if self._target_value is not None:
-      self._draw_text_centered(self._font_bold, str(round(self._target_value)), TARGET_FONT_SIZE,
-                               cx, text_top + TARGET_FONT_SIZE / 2, rl.color_alpha(WHITE, alpha))
+      text = str(round(self._target_value))
+      text_cy = text_top + TARGET_FONT_SIZE / 2
+      # black rim (complication shadow idiom, all four diagonals): the torque-bar fill
+      # under this text is white at 0.9 alpha, so a bare white glyph would vanish in it
+      shadow = rl.Color(0, 0, 0, int(180 * alpha))
+      for dx, dy in ((-1, -1), (1, -1), (-1, 1), (1, 1)):
+        self._draw_text_centered(self._font_bold, text, TARGET_FONT_SIZE,
+                                 cx + dx * TARGET_SHADOW_DEPTH, text_cy + dy * TARGET_SHADOW_DEPTH, shadow)
+      self._draw_text_centered(self._font_bold, text, TARGET_FONT_SIZE, cx, text_cy,
+                               rl.color_alpha(WHITE, alpha))
 
     row_cy = text_top - TARGET_ICON_GAP - ICON_ROW_H / 2
     self._draw_icon_row(cx, row_cy, alpha)
@@ -347,14 +377,14 @@ class MiciSpeedLimitSign(Widget):
   def _draw_controller_icon(self, controller: int, cx: float, cy: float, r: float,
                             tint: rl.Color, alpha: float) -> None:
     if controller == BRAKE_CONTROLLER or controller == PrimaryLimiter.forceDecel:
-      self._draw_text_centered(self._font_bold, "BRAKE", int(r), cx, cy, tint)
+      self._draw_text_centered(self._font_bold, "BRAKE", BRAKE_FONT_SIZE, cx, cy, tint)
     elif controller == PrimaryLimiter.stopped:
       self._draw_octagon(cx, cy, r, tint, alpha)
     elif controller == PrimaryLimiter.model:
       if self._model_stopping:
         self._draw_octagon(cx, cy, r, tint, alpha)
       else:
-        scale = (2 * r + 6) / self._experimental_tex.width
+        scale = (2 * r) / self._experimental_tex.width
         pos = rl.Vector2(cx - self._experimental_tex.width * scale / 2, cy - self._experimental_tex.height * scale / 2)
         rl.draw_texture_ex(self._experimental_tex, pos, 0.0, scale, tint)
     elif controller in (PrimaryLimiter.sccVision, PrimaryLimiter.sccMap):

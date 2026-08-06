@@ -190,7 +190,9 @@ class MiciAugmentedRoadViewBP(MiciCameraViewBP, AugmentedRoadView, BlindspotRend
       self._alert_renderer.render(self._content_rect)
     self._hud_renderer.render(self._content_rect)
 
-    # BluePilot: speed limit sign + controller icons overlay (hides itself while visible alerts show)
+    # BluePilot: speed limit sign + controller icons overlay (hides itself while visible alerts
+    # show; the left-column sign also yields to the set-speed readout, like the DM face above)
+    self._speed_limit_sign.set_top_icons_active(self._hud_renderer.drawing_top_icons())
     self._speed_limit_sign.render(self._content_rect)
 
     bp_ui_log.scissor("MiciAugRoadView", "end")
