@@ -106,6 +106,11 @@ class SpeedLimitAssist:
     # engagement. Coverage gaps (pending) re-cap at the next limit directly instead of
     # demanding another press; only disengagement (or turning SLA off) clears it.
     self._pcm_long_consented = False
+
+    # BluePilot: the held limit outlived its grace period. The cap stays (releasing it would snap
+    # the car up to the cruise set speed), so the driver is told once, with a downbeat chime.
+    self._speed_limit_stale = False
+    self._stale_announced = False
     self.alpha_long_offset = int(self.params.get("AlphaLongIcbmOffset", return_default=True))
     self.suggested_set_speed_conv = 0
     # ICBM manages the cluster under alpha long: ceiling prompts are its job, not the driver's
@@ -479,6 +484,16 @@ class SpeedLimitAssist:
     if self.state == SpeedLimitAssistState.pending and self._state_prev != SpeedLimitAssistState.pending:
       events_sp.add(EventNameSP.speedLimitPending)
 
+    # BluePilot: confidence in the held limit is gone — one downbeat chime, then silence until
+    # real data returns. Only while actively capping: announcing a stale limit SLA is not
+    # enforcing would be noise.
+    if self._speed_limit_stale and self.is_active:
+      if not self._stale_announced:
+        events_sp.add(EventNameSP.speedLimitLost)
+        self._stale_announced = True
+    elif not self._speed_limit_stale:
+      self._stale_announced = False
+
     if self.pcm_op_long:
       self._update_pcm_long_prompts(events_sp)
 
@@ -501,8 +516,10 @@ class SpeedLimitAssist:
       self._last_event_limit_conv = 0
 
   def update(self, long_enabled: bool, long_override: bool, v_ego: float, a_ego: float, v_cruise_cluster: float, speed_limit: float,
-             speed_limit_final_last: float, has_speed_limit: bool, distance: float, events_sp: EventsSP) -> None:
+             speed_limit_final_last: float, has_speed_limit: bool, distance: float, events_sp: EventsSP,
+             speed_limit_stale: bool = False) -> None:
     self.long_enabled = long_enabled
+    self._speed_limit_stale = speed_limit_stale
     self.v_ego = v_ego
     self.a_ego = a_ego
 

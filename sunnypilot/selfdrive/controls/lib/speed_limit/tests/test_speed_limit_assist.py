@@ -540,3 +540,43 @@ class TestSpeedLimitAssist:
         assert self.sla.state in [SpeedLimitAssistState.preActive, SpeedLimitAssistState.active]
       elif initial_state in ACTIVE_STATES:
         assert self.sla.state in ACTIVE_STATES
+
+  def test_stale_limit_chimes_once_and_keeps_capping(self):
+    # map data goes stale while SLA is capping: the cap must hold (releasing it snaps the car up
+    # to the cruise set speed) and the driver gets exactly one downbeat chime
+    self._consent_to_active()
+    self.events_sp.clear()
+
+    self.sla.update(True, False, SPEED_LIMITS['city'], 0, self.pcm_long_max_set_speed, 0,
+                    SPEED_LIMITS['city'], True, 0, self.events_sp, True)
+    assert self.sla.state in ACTIVE_STATES
+    assert self.sla.output_v_target == SPEED_LIMITS['city']  # still capped at the held limit
+    assert EventNameSP.speedLimitLost in self.events_sp.names
+
+    # every later stale frame is silent
+    for _ in range(int(3. / DT_MDL)):
+      self.events_sp.clear()
+      self.sla.update(True, False, SPEED_LIMITS['city'], 0, self.pcm_long_max_set_speed, 0,
+                      SPEED_LIMITS['city'], True, 0, self.events_sp, True)
+      assert EventNameSP.speedLimitLost not in self.events_sp.names
+
+  def test_stale_chime_rearms_after_data_returns(self):
+    self._consent_to_active()
+    self.sla.update(True, False, SPEED_LIMITS['city'], 0, self.pcm_long_max_set_speed, 0,
+                    SPEED_LIMITS['city'], True, 0, self.events_sp, True)
+
+    # live data returns, then is lost again — the second loss chimes again
+    self.sla.update(True, False, SPEED_LIMITS['city'], 0, self.pcm_long_max_set_speed,
+                    SPEED_LIMITS['city'], SPEED_LIMITS['city'], True, 0, self.events_sp, False)
+    self.events_sp.clear()
+    self.sla.update(True, False, SPEED_LIMITS['city'], 0, self.pcm_long_max_set_speed, 0,
+                    SPEED_LIMITS['city'], True, 0, self.events_sp, True)
+    assert EventNameSP.speedLimitLost in self.events_sp.names
+
+  def test_stale_limit_does_not_chime_when_not_capping(self):
+    # SLA inactive (never confirmed): a stale limit it is not enforcing must stay silent
+    self.sla.state = SpeedLimitAssistState.preActive
+    self.sla.update(True, False, SPEED_LIMITS['city'], 0, self.pcm_long_max_set_speed, 0,
+                    SPEED_LIMITS['city'], True, 0, self.events_sp, True)
+    assert not self.sla.is_active
+    assert EventNameSP.speedLimitLost not in self.events_sp.names

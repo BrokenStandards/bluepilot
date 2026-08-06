@@ -262,6 +262,16 @@ EVENTS_SP: dict[int, dict[str, Alert | AlertCallbackType]] = {
       Priority.LOW, VisualAlert.none, AudibleAlertSP.promptSingleHigh, 5.),
   },
 
+  # BluePilot: map data went stale while SLA keeps capping at the last known limit. Downbeat
+  # (low) chime — the counterpart to the confident high chime used for adopting a new limit.
+  EventNameSP.speedLimitLost: {
+    ET.WARNING: Alert(
+      "",
+      "",
+      AlertStatus.normal, AlertSize.none,
+      Priority.LOW, VisualAlert.none, AudibleAlertSP.promptSingleLow, 3.),
+  },
+
   # BluePilot: one-shot pcm-long ceiling prompts (emitted at most once per episode by SLA)
   EventNameSP.speedLimitSetSpeedHint: {
     ET.WARNING: speed_limit_set_speed_hint_alert,

@@ -6,8 +6,11 @@ See the LICENSE.md file in the root directory for more details.
 """
 LIMIT_ADAPT_ACC = -1.  # m/s^2 Ideal acceleration for the adapting (braking) phase when approaching speed limits.
 LIMIT_MAX_MAP_DATA_AGE = 10.  # s Maximum time to hold to map data, then consider it invalid inside limits controllers.
-# s How long the last seen speed limit is held once the resolved limit becomes invalid. Bridges short
-# coverage gaps (OSM holes, source flaps) without capping the car on a stale limit indefinitely.
+# s Grace period after the resolved limit becomes invalid before the held limit is announced as
+# stale. Short coverage gaps (OSM holes, source flaps) are bridged silently within it. Past it the
+# limit is still held — releasing it would snap the car back up to the cruise set speed — but the
+# driver is told once with a downbeat chime that confidence in the limit is gone, and the sign
+# greys the numeral (speedLimitValid false) for as long as it stays stale.
 LIMIT_LAST_HOLD_TIME = 10.
 
 # Speed Limit Assist constants

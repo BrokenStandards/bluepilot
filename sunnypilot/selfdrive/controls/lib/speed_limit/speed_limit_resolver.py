@@ -74,6 +74,7 @@ class SpeedLimitResolver:
     self.speed_limit_final_last = 0.
     self.speed_limit_offset = 0.
     self._last_limit_hold_frames = 0
+    self.speed_limit_stale = False
 
   def update_speed_limit_states(self) -> None:
     self.speed_limit_final = self.speed_limit + self.speed_limit_offset
@@ -82,13 +83,16 @@ class SpeedLimitResolver:
       self.speed_limit_last = self.speed_limit
       self.speed_limit_final_last = self.speed_limit_final
       self._last_limit_hold_frames = int(LIMIT_LAST_HOLD_TIME / DT_MDL)
+      self.speed_limit_stale = False
     elif self._last_limit_hold_frames > 0:
+      # inside the grace period: bridge the gap silently, the limit is still trusted
       self._last_limit_hold_frames -= 1
     else:
-      # held limit expired: SLA feeds speed_limit_final_last into the planner's min() whenever
-      # enabled, so a limit latched forever would keep capping the car on roads it no longer applies to
-      self.speed_limit_last = 0.
-      self.speed_limit_final_last = 0.
+      # BluePilot: past the grace period the last limit is KEPT rather than zeroed. Zeroing made
+      # SLA release the cap, which snapped the car back up to the cruise set speed on every OSM
+      # hole. The limit is instead flagged stale: the driver gets one downbeat chime and the sign
+      # greys its numeral, and the cap stays until real data replaces it.
+      self.speed_limit_stale = self.speed_limit_last > 0.
 
   @property
   def speed_limit_valid(self) -> bool:

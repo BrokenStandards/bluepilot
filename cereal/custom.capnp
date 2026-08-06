@@ -371,6 +371,7 @@ struct OnroadEventSP @0xda96579883444c35 {
     e2eChime @23;
     speedLimitSetSpeedHint @24;
     speedLimitRaiseSetSpeed @25;
+    speedLimitLost @26;
   }
 }
 

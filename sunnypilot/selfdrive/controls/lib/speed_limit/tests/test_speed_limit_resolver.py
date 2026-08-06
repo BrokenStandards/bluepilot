@@ -220,17 +220,33 @@ class TestSpeedLimitResolverLastLimitHold:
     self._run_gap_frames(resolver, sm_mock, 40)  # 2 s at DT_MDL
     assert resolver.speed_limit_last == 25.
     assert resolver.speed_limit_last_valid
+    assert not resolver.speed_limit_stale  # inside the grace period: bridged silently
 
-  def test_last_limit_expires_after_hold_period(self, resolver_class, mocker: MockerFixture):
+  def test_last_limit_is_kept_past_hold_period_and_marked_stale(self, resolver_class, mocker: MockerFixture):
+    # zeroing the held limit made SLA release the cap, snapping the car back up to the cruise
+    # set speed on every OSM hole. The limit is kept and flagged stale instead.
     resolver, sm_mock = self._make_resolver_with_limit(resolver_class, mocker)
-    self._run_gap_frames(resolver, sm_mock, 240)  # 12 s at DT_MDL, past the 10 s hold
-    assert resolver.speed_limit_last == 0.
-    assert resolver.speed_limit_final_last == 0.
-    assert not resolver.speed_limit_last_valid
+    self._run_gap_frames(resolver, sm_mock, 240)  # 12 s at DT_MDL, past the 10 s grace period
+    assert resolver.speed_limit_last == 25.
+    assert resolver.speed_limit_final_last == 25.
+    assert resolver.speed_limit_last_valid
+    assert resolver.speed_limit_stale
+    assert not resolver.speed_limit_valid  # live data is gone: the sign greys the numeral
+
+  def test_stale_clears_when_data_returns(self, resolver_class, mocker: MockerFixture):
+    resolver, sm_mock = self._make_resolver_with_limit(resolver_class, mocker)
+    self._run_gap_frames(resolver, sm_mock, 240)
+    assert resolver.speed_limit_stale
+    sm_mock['liveMapDataSP'].speedLimitValid = True
+    sm_mock['liveMapDataSP'].speedLimit = 25.
+    resolver.update(27.8, sm_mock)
+    assert not resolver.speed_limit_stale
+    assert resolver.speed_limit_valid
 
   def test_limit_reacquired_after_expiry(self, resolver_class, mocker: MockerFixture):
     resolver, sm_mock = self._make_resolver_with_limit(resolver_class, mocker)
     self._run_gap_frames(resolver, sm_mock, 240)
+    assert resolver.speed_limit_last == 25.  # held, not zeroed
     sm_mock['liveMapDataSP'].speedLimitValid = True
     sm_mock['liveMapDataSP'].speedLimit = 19.4
     resolver.update(27.8, sm_mock)
