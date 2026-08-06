@@ -1,15 +1,17 @@
-"""BluePilot MICI: speed limit sign overlay + longitudinal controller icons.
+"""BluePilot MICI: speed limit sign + longitudinal target cluster.
 
-The sign (MUTCD imperial / Vienna circle metric) is the single home for the longitudinal
-target: when a controller is actively limiting, its target speed is shown in the sign
-(curve targets included — the old yellow curve diamond is gone), falling back to the
-resolved speed limit otherwise. It flashes with an underglow in sync with the chime-only
-speedLimit* alerts (visual replacement for the old text banners).
+The sign (MUTCD imperial / Vienna circle metric) shows the resolved speed limit on the
+left edge, between the driver-monitoring face and the steering wheel. It flashes with an
+underglow in sync with the chime-only speedLimit* alerts (visual replacement for the old
+text banners).
 
-Above the sign, up to three road-sign icons name the longitudinal controllers (toggle:
-BPLongitudinalTargetHUD). Leftmost (slightly larger) is the current controller; the two
-slots right of it are the largest contributors over a rolling window (BPLimiterWindow,
-0-5 s) ranked by gross |accel| contribution. Icon language:
+The longitudinal target lives at the bottom center, over the steering torque curve
+(toggle: BPLongitudinalTargetHUD): the current limiter's target speed in large white
+text, with up to three road-sign icons above it naming the longitudinal controllers.
+Leftmost is the current controller; the two slots right of it are the largest
+contributors over a rolling window (BPLimiterWindow, 0-5 s) ranked by gross |accel|
+contribution. All icons are the same size — the experimental flask matches its
+home-screen size. Icon language:
   curve triangle = vision/map curve control     octagon = stopped / model stop intent
   following-distance circle = lead              gauge = cruise set speed / accel schedule
   experimental flask = e2e model                BRAKE = manual braking
@@ -53,20 +55,28 @@ V_TARGET_UNSET = 200.0  # m/s; inactive controllers publish V_CRUISE_UNSET (255)
 # UI-side pseudo-controller for driver braking (outside the capnp enum range)
 BRAKE_CONTROLLER = 1000
 
-MARGIN_TOP = 10
-MARGIN_RIGHT = 14
+# Sign column: centered on the DM face (16 + 60/2) and steering wheel (21 + 50/2)
+# column, vertically between the face (bottom y=70) and the powerflow arc around the
+# wheel (top y≈156).
+SIGN_CX = 46
+SIGN_CY = 113
 
 MUTCD_W = 60
 MUTCD_H = 78
 VIENNA_RADIUS = 37
 
-ICON_ROW_H = 36
-ICON_SLOT_W = 30
-ICON_R = 11              # base icon half-size
-CURRENT_SCALE = 1.2      # leftmost/current slot is slightly larger
+# Bottom-center target cluster, aligned with the torque bar's arc center
+TORQUE_CENTER_OFFSET_X = 8   # torque bar draws 8px right of the camera-feed center
+TARGET_FONT_SIZE = 54
+TARGET_BOTTOM_MARGIN = 16
+TARGET_ICON_GAP = 6
+
+ICON_ROW_H = 60
+ICON_SLOT_W = 56
+ICON_R = 21              # icon half-size; experimental texture = 2r + 6 = 48px (home-screen size)
 CONTRIB_FULL_DV = 1.5    # m/s net delta-v for full color saturation
-CONTRIB_PX_PER_DV = 6.0  # vertical px per m/s net delta-v (accel raises, decel lowers)
-CONTRIB_MAX_OFFSET = 9.0
+CONTRIB_PX_PER_DV = 8.0  # vertical px per m/s net delta-v (accel raises, decel lowers)
+CONTRIB_MAX_OFFSET = 12.0
 
 WHITE = rl.WHITE
 BLACK = rl.BLACK
@@ -92,6 +102,7 @@ class MiciSpeedLimitSign(Widget):
     self._experimental_tex = gui_app.texture('icons_mici/experimental_mode.png', 2 * ICON_R + 6, 2 * ICON_R + 6)
 
     self._alpha_filter = FirstOrderFilter(0.0, 0.1, 1 / gui_app.target_fps)
+    self._target_alpha_filter = FirstOrderFilter(0.0, 0.1, 1 / gui_app.target_fps)
 
     self._speed_limit = 0.0
     self._speed_limit_valid = False
@@ -169,7 +180,7 @@ class MiciSpeedLimitSign(Widget):
     v_ego = car_state.vEgoCluster if car_state.vEgoCluster != 0.0 else car_state.vEgo
     self._speed = max(0.0, v_ego * self._speed_conv)
 
-    # curve activation still drives the flash; the target itself now lives in the sign
+    # curve activation still drives the flash; the curve target shows at bottom center
     vision_active = scc.vision.state in SCC_VISION_ACTIVE_STATES
     map_active = scc.map.state == MapState.turning
     self._curve_active = vision_active or map_active
@@ -226,51 +237,40 @@ class MiciSpeedLimitSign(Widget):
     return self._alert_flash or time.monotonic() < self._flash_until
 
   def _render(self, rect: rl.Rectangle) -> None:
-    show_limit = self._has_limit and self._speed_limit > 0
-    show_target = self._icons_enabled and self._target_value is not None
-    visible = ui_state.started and (show_limit or show_target) and (self._persistent or self._flashing)
-
     # keep clear of visible (non-chime) alerts, which own the top of the screen
-    if ui_state.sm['selfdriveState'].alertSize != 0:
-      visible = False
+    alert_showing = ui_state.sm['selfdriveState'].alertSize != 0
 
-    alpha = self._alpha_filter.update(1.0 if visible else 0.0)
-    if alpha < 1e-2:
-      return
+    show_limit = (ui_state.started and not alert_showing and
+                  self._has_limit and self._speed_limit > 0 and (self._persistent or self._flashing))
+    has_slots = any(slot is not None for slot in self._slots)
+    show_target = (ui_state.started and not alert_showing and self._icons_enabled and
+                   (self._target_value is not None or has_slots))
 
-    center_x = rect.x + rect.width - MARGIN_RIGHT - max(MUTCD_W, VIENNA_RADIUS * 2) / 2
+    alpha = self._alpha_filter.update(1.0 if show_limit else 0.0)
+    if alpha >= 1e-2:
+      cx = rect.x + SIGN_CX
+      cy = rect.y + SIGN_CY
+      if self._flashing:
+        self._draw_underglow(cx, cy, alpha)
+      if ui_state.is_metric:
+        self._draw_vienna(cx, cy, alpha)
+      else:
+        self._draw_mutcd(cx, cy, alpha)
 
-    if self._flashing:
-      self._draw_underglow(center_x, alpha)
+    target_alpha = self._target_alpha_filter.update(1.0 if show_target else 0.0)
+    if target_alpha >= 1e-2:
+      self._draw_target_cluster(rect, target_alpha)
 
-    value = self._target_value if show_target else self._speed_limit
-    if ui_state.is_metric:
-      self._draw_vienna(center_x, value, show_target, alpha)
-    else:
-      self._draw_mutcd(center_x, value, show_target, alpha)
-
-    if self._icons_enabled:
-      self._draw_icon_row(center_x, alpha)
-
-  def _row_h(self) -> float:
-    return ICON_ROW_H if self._icons_enabled else 0
-
-  def _sign_top(self) -> float:
-    return self._rect.y + MARGIN_TOP + self._row_h()
-
-  def _sign_center_y(self) -> float:
-    return self._sign_top() + (VIENNA_RADIUS if ui_state.is_metric else MUTCD_H / 2)
-
-  def _draw_underglow(self, center_x: float, alpha: float) -> None:
+  def _draw_underglow(self, cx: float, cy: float, alpha: float) -> None:
     pulse = 0.45 + 0.55 * abs(math.sin(time.monotonic() * math.pi * 1.5))
     color = rl.Color(GLOW_LIMIT.r, GLOW_LIMIT.g, GLOW_LIMIT.b, int(200 * pulse * alpha))
-    rl.draw_circle_gradient(rl.Vector2(center_x, self._sign_center_y()), MUTCD_H * 0.85, color, rl.BLANK)
+    rl.draw_circle_gradient(rl.Vector2(cx, cy), MUTCD_H * 0.85, color, rl.BLANK)
 
-  def _value_text_color(self, showing_target: bool, alpha: float) -> rl.Color:
+  def _value_text_color(self, alpha: float) -> rl.Color:
     is_overspeed = self._has_limit and round(self._speed_limit_final_last) < round(self._speed)
-    if not showing_target and is_overspeed:
+    if is_overspeed:
       color = RED
-    elif not showing_target and not self._speed_limit_valid:
+    elif not self._speed_limit_valid:
       color = GREY
     else:
       color = BLACK
@@ -280,9 +280,9 @@ class MiciSpeedLimitSign(Widget):
     sz = measure_text_cached(font, text, size)
     rl.draw_text_ex(font, text, rl.Vector2(cx - sz.x / 2, cy - sz.y / 2), size, 0, color)
 
-  def _draw_mutcd(self, center_x: float, value: float, showing_target: bool, alpha: float) -> None:
-    x = center_x - MUTCD_W / 2
-    y = self._sign_top()
+  def _draw_mutcd(self, cx: float, cy: float, alpha: float) -> None:
+    x = cx - MUTCD_W / 2
+    y = cy - MUTCD_H / 2
     sign_rect = rl.Rectangle(x, y, MUTCD_W, MUTCD_H)
 
     white = rl.color_alpha(WHITE, alpha)
@@ -292,24 +292,35 @@ class MiciSpeedLimitSign(Widget):
     inner = rl.Rectangle(x + 4, y + 4, MUTCD_W - 8, MUTCD_H - 8)
     rl.draw_rectangle_rounded_lines_ex(inner, 0.25, 8, 2, black)
 
-    self._draw_text_centered(self._font_semi_bold, "SPEED", 13, center_x, y + 14, black)
-    self._draw_text_centered(self._font_semi_bold, "LIMIT", 13, center_x, y + 27, black)
-    self._draw_text_centered(self._font_bold, str(round(value)), 36, center_x, y + 53,
-                             self._value_text_color(showing_target, alpha))
+    self._draw_text_centered(self._font_semi_bold, "SPEED", 13, cx, y + 14, black)
+    self._draw_text_centered(self._font_semi_bold, "LIMIT", 13, cx, y + 27, black)
+    self._draw_text_centered(self._font_bold, str(round(self._speed_limit)), 36, cx, y + 53,
+                             self._value_text_color(alpha))
 
-  def _draw_vienna(self, center_x: float, value: float, showing_target: bool, alpha: float) -> None:
+  def _draw_vienna(self, cx: float, cy: float, alpha: float) -> None:
     radius = VIENNA_RADIUS
-    center = rl.Vector2(center_x, self._sign_top() + radius)
+    center = rl.Vector2(cx, cy)
 
     rl.draw_circle_v(center, radius, rl.color_alpha(WHITE, alpha))
     rl.draw_ring(center, radius * 0.72, radius, 0, 360, 36, rl.color_alpha(RED, alpha))
 
-    val = str(round(value))
+    val = str(round(self._speed_limit))
     font_size = 26 if len(val) >= 3 else 32
     self._draw_text_centered(self._font_bold, val, font_size, center.x, center.y,
-                             self._value_text_color(showing_target, alpha))
+                             self._value_text_color(alpha))
 
-  # ---- controller icon row ----
+  # ---- bottom-center target cluster (target speed + controller icon row) ----
+
+  def _draw_target_cluster(self, rect: rl.Rectangle, alpha: float) -> None:
+    cx = rect.x + rect.width / 2 + TORQUE_CENTER_OFFSET_X
+
+    text_top = rect.y + rect.height - TARGET_BOTTOM_MARGIN - TARGET_FONT_SIZE
+    if self._target_value is not None:
+      self._draw_text_centered(self._font_bold, str(round(self._target_value)), TARGET_FONT_SIZE,
+                               cx, text_top + TARGET_FONT_SIZE / 2, rl.color_alpha(WHITE, alpha))
+
+    row_cy = text_top - TARGET_ICON_GAP - ICON_ROW_H / 2
+    self._draw_icon_row(cx, row_cy, alpha)
 
   def _contrib_style(self, net_dv: float, alpha: float) -> tuple[rl.Color, float]:
     """Tint + vertical offset from the controller's net delta-v over the window."""
@@ -322,19 +333,16 @@ class MiciSpeedLimitSign(Widget):
     offset = -max(-CONTRIB_MAX_OFFSET, min(CONTRIB_MAX_OFFSET, net_dv * CONTRIB_PX_PER_DV))
     return rl.Color(r, g, b, int(255 * alpha)), offset
 
-  def _draw_icon_row(self, sign_center_x: float, alpha: float) -> None:
-    right_edge = sign_center_x + max(MUTCD_W, VIENNA_RADIUS * 2) / 2
-    row_cy = self._rect.y + MARGIN_TOP + ICON_ROW_H / 2
+  def _draw_icon_row(self, cx: float, row_cy: float, alpha: float) -> None:
+    row_left = cx - 1.5 * ICON_SLOT_W
 
     for i, slot in enumerate(self._slots):
       if slot is None:
         continue
       controller, net_dv = slot
       tint, dy = self._contrib_style(net_dv, alpha)
-      scale = CURRENT_SCALE if i == 0 else 1.0
-      cx = right_edge - (3 - i) * ICON_SLOT_W + ICON_SLOT_W / 2
-      cy = row_cy + dy
-      self._draw_controller_icon(controller, cx, cy, ICON_R * scale, tint, alpha)
+      icon_cx = row_left + (i + 0.5) * ICON_SLOT_W
+      self._draw_controller_icon(controller, icon_cx, row_cy + dy, ICON_R, tint, alpha)
 
   def _draw_controller_icon(self, controller: int, cx: float, cy: float, r: float,
                             tint: rl.Color, alpha: float) -> None:
@@ -359,7 +367,7 @@ class MiciSpeedLimitSign(Widget):
   def _draw_octagon(self, cx: float, cy: float, r: float, tint: rl.Color, alpha: float) -> None:
     center = rl.Vector2(cx, cy)
     rl.draw_poly(center, 8, r, 22.5, tint)
-    rl.draw_poly_lines_ex(center, 8, r, 22.5, 2, rl.color_alpha(WHITE, alpha))
+    rl.draw_poly_lines_ex(center, 8, r, 22.5, 3, rl.color_alpha(WHITE, alpha))
 
   def _draw_curve_triangle(self, cx: float, cy: float, r: float, tint: rl.Color) -> None:
     # warning triangle with a bend arrow
@@ -367,12 +375,12 @@ class MiciSpeedLimitSign(Widget):
     left = rl.Vector2(cx - r, cy + r * 0.85)
     right = rl.Vector2(cx + r, cy + r * 0.85)
     for a, b in ((top, left), (left, right), (right, top)):
-      rl.draw_line_ex(a, b, 2.5, tint)
+      rl.draw_line_ex(a, b, 4, tint)
     rl.draw_ring(rl.Vector2(cx - r * 0.25, cy + r * 0.55), r * 0.35, r * 0.55, 270, 360, 10, tint)
 
   def _draw_following_distance(self, cx: float, cy: float, r: float, tint: rl.Color) -> None:
     # two cars in a circle: keep-your-distance
-    rl.draw_ring(rl.Vector2(cx, cy), r - 2, r, 0, 360, 24, tint)
+    rl.draw_ring(rl.Vector2(cx, cy), r - 3.5, r, 0, 360, 24, tint)
     car_w, car_h = r * 0.55, r * 0.4
     for dx in (-r * 0.45, r * 0.45):
       rl.draw_rectangle_rounded(rl.Rectangle(cx + dx - car_w / 2, cy - car_h / 2, car_w, car_h), 0.5, 4, tint)
@@ -380,7 +388,7 @@ class MiciSpeedLimitSign(Widget):
   def _draw_cruise_gauge(self, cx: float, cy: float, r: float, tint: rl.Color) -> None:
     # dashboard cruise-control symbol: open speedometer arc with a needle
     center = rl.Vector2(cx, cy)
-    rl.draw_ring(center, r - 2.5, r, 135, 405, 20, tint)
+    rl.draw_ring(center, r - 4, r, 135, 405, 20, tint)
     needle_angle = math.radians(-45)
     tip = rl.Vector2(cx + r * 0.75 * math.cos(needle_angle), cy + r * 0.75 * math.sin(needle_angle))
-    rl.draw_line_ex(center, tip, 2.5, tint)
+    rl.draw_line_ex(center, tip, 4, tint)

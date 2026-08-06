@@ -28,7 +28,8 @@
         "Added lateralManeuverPlan support from upstream",
         "Updated submodules: panda, msgq, rednose",
         "macOS build support for Cabana with dynamic parallel job detection",
-        "Added replay tool support for non-larch64 architectures"
+        "Added replay tool support for non-larch64 architectures",
+        "MICI: HUD rearranged — resolved speed limit sign now sits on the left between the driver-monitoring face and the steering wheel; the longitudinal target speed moved to large white text at the bottom center over the steering torque curve, with the controller icons above it (uniform size, experimental flask at its home-screen 48px size)"
       ],
       "fixes": [
         "Speed limit resolver: map-data staleness guard and upcoming-limit adaptation were dead code (monotonic vs Unix-epoch clock mismatch); stale GPS fixes now invalidate map limits and the car adapts toward a lower limit ahead",

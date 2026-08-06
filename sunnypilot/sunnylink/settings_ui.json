@@ -675,7 +675,7 @@
               "key": "BPLimiterWindow",
               "widget": "option",
               "title": "Longitudinal Controller Icons Window",
-              "description": "Rolling window (seconds) over which the speed-sign controller icons rank and color longitudinal controllers by their accel/decel contribution.",
+              "description": "Rolling window (seconds) over which the bottom-center controller icons rank and color longitudinal controllers by their accel/decel contribution.",
               "min": 0.0,
               "max": 5.0,
               "step": 0.1,

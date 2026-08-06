@@ -1,8 +1,8 @@
 """BluePilot: rolling signed-contribution window for the longitudinal controller icons.
 
 Aggregates the planner's per-frame controller (primaryLimiter, plus the UI-side BRAKE
-pseudo-controller) with its signed accel over the last few seconds, so the speed-sign HUD
-can show which controllers drove speed changes: gross contribution (sum |a|*dt) ranks the
+pseudo-controller) with its signed accel over the last few seconds, so the bottom-center
+target cluster can show which controllers drove speed changes: gross contribution (sum |a|*dt) ranks the
 top contributors, net contribution (sum a*dt, i.e. the delta-v in m/s attributable to the
 controller) drives icon color saturation (green accel / red decel, grey at neutral) and
 vertical offset. Pure logic — no UI imports — unit-testable headless.

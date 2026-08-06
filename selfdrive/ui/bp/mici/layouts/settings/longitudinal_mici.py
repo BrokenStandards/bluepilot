@@ -20,7 +20,7 @@ class LongitudinalLayoutMici(NavScroller):
     )
     self.disable_downhill_comp = BigParamControlBP("Disable Downhill Compensation", "disable_downhill_comp_UI")
     self.disable_ford_radar = BigParamControlBP("Disable Ford Radar (Vision-Only Leads)", "disable_ford_radar_UI")
-    self.long_target_hud = BigParamControlBP("Longitudinal Controller Icons (Speed Sign)", "BPLongitudinalTargetHUD")
+    self.long_target_hud = BigParamControlBP("Longitudinal Target Speed + Controller Icons", "BPLongitudinalTargetHUD")
     self.model_decel_gate = BigParamControlBP("Model Decel Gate (E2E Brakes, ACC Accelerates)", "BPModelDecelGate")
     self.model_decel_gate_accel = BigParamFloatControl(
       "Decel Gate Engage Threshold (m/s²)", "BPModelDecelGateAccel", min=-5.00, max=0.00, step=0.01,
