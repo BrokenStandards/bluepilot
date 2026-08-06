@@ -4,6 +4,7 @@ Copyright (c) 2021-, Haibin Wen, sunnypilot, and a number of other contributors.
 This file is part of sunnypilot and is licensed under the MIT License.
 See the LICENSE.md file in the root directory for more details.
 """
+# BluePilot: json/math and the R/TO_DEGREES imports serve the metric point helpers below
 import json
 import math
 import platform
@@ -13,9 +14,11 @@ from openpilot.common.params import Params
 from openpilot.common.realtime import DT_MDL
 from openpilot.selfdrive.car.cruise import V_CRUISE_UNSET
 from openpilot.sunnypilot.selfdrive.controls.lib.smart_cruise_control.map_controller import R, TO_DEGREES, SmartCruiseControlMap
+# End BluePilot
 
 MapState = VisionState = custom.LongitudinalPlanSP.SmartCruiseControl.MapState
 
+# BluePilot: helpers for the along-path distance / reversal-truncation / placeholder tests
 M_TO_DEG = TO_DEGREES / R  # meters to degrees of latitude (and of longitude on the equator)
 NO_TARGET_V = 100.0  # min_v's initial value in update_calculations - left untouched when no braking target is selected
 
@@ -23,6 +26,7 @@ NO_TARGET_V = 100.0  # min_v's initial value in update_calculations - left untou
 def make_point(x, y, v):
   # x is meters east and y is meters north of the origin; on the equator both axes convert with the same factor
   return {"latitude": y * M_TO_DEG, "longitude": x * M_TO_DEG, "velocity": v}
+# End BluePilot
 
 
 class TestSmartCruiseControlMap:
@@ -40,13 +44,19 @@ class TestSmartCruiseControlMap:
     self.params.put("LastGPSPosition", "{}", block=True)
     self.params.put("MapTargetVelocities", "{}", block=True)
 
-  def run_calculations(self, points, v_ego, position=(0.0, 0.0)):
+  # BluePilot: drive update_calculations directly from metric points; the optional bearing
+  # mimics osm_map_data.update_location writing the vehicle bearing into LastGPSPosition
+  def run_calculations(self, points, v_ego, position=(0.0, 0.0), bearing=None):
     x, y = position
-    self.mem_params.put("LastGPSPosition", json.dumps({"latitude": y * M_TO_DEG, "longitude": x * M_TO_DEG}), block=True)
+    gps = {"latitude": y * M_TO_DEG, "longitude": x * M_TO_DEG}
+    if bearing is not None:
+      gps["bearing"] = bearing
+    self.mem_params.put("LastGPSPosition", json.dumps(gps), block=True)
     self.mem_params.put("MapTargetVelocities", json.dumps(points), block=True)
     self.scc_m.v_ego = v_ego
     self.scc_m.a_ego = 0.0
     self.scc_m.update_calculations()
+  # End BluePilot
 
   def test_initial_state(self):
     assert self.scc_m.state == VisionState.disabled
@@ -75,6 +85,7 @@ class TestSmartCruiseControlMap:
 
   # TODO-SP: mock data from modelV2 to test other states
 
+  # BluePilot: along-path distance, reversal-truncation and placeholder-skip coverage
   def test_single_curve_slowdown(self):
     # regression: a slow point straight ahead within the braking window still produces a target.
     # for v_ego=20, a_ego=0 and tv=10 the jerk/accel window works out to ~154.8 m
@@ -116,3 +127,45 @@ class TestSmartCruiseControlMap:
     assert self.scc_m.v_target == NO_TARGET_V
     assert self.scc_m.target_lat == 0.0
     assert self.scc_m.target_lon == 0.0
+
+  def test_truncation_at_uturn_apex_first_segment(self):
+    # the nearest point IS the U-turn apex: the chain doubles back from the very first forward
+    # segment, so only the vehicle-bearing seed can catch the reversal. The doubled-back slow
+    # points are 30-130 m along-path (inside the ~279.8 m window for v_ego=25, tv=5); the car
+    # heads east (bearing 90) while segment one heads west -> truncated, no braking
+    points = [make_point(0.0, 0.0, 30.0)]
+    points += [make_point(-x, 2.0, 5.0) for x in (30, 80, 130)]
+    self.run_calculations(points, v_ego=25.0, bearing=90.0)
+    assert self.scc_m.v_target == NO_TARGET_V
+    assert self.scc_m.target_lat == 0.0
+    assert self.scc_m.target_lon == 0.0
+
+  def test_missing_bearing_skips_first_segment_check(self):
+    # without a 'bearing' field in LastGPSPosition the first-segment check is skipped gracefully:
+    # the same apex chain as above is walked without truncation (pre-seed behavior) and the
+    # doubled-back slow points become a target instead of crashing
+    points = [make_point(0.0, 0.0, 30.0)]
+    points += [make_point(-x, 2.0, 5.0) for x in (30, 80, 130)]
+    self.run_calculations(points, v_ego=25.0)
+    assert self.scc_m.v_target == 5.0
+
+  def test_forward_path_with_bearing_still_brakes(self):
+    # the vehicle-bearing seed must not truncate a normal forward path: car heading east with the
+    # chain heading east keeps the slow point at x=140 as the braking target
+    points = [make_point(x, 0.0, 10.0 if x == 140 else 30.0) for x in range(0, 300, 20)]
+    self.run_calculations(points, v_ego=20.0, bearing=90.0)
+    assert self.scc_m.v_target == 10.0
+    assert math.isclose(self.scc_m.target_lon, 140 * M_TO_DEG)
+
+  def test_placeholder_entries_skipped(self):
+    # mapd's GetTargetVelocities leaves (0,0,0) placeholder entries for zero-curvature points; a
+    # placeholder mid-chain sits at the origin, so the walk would see a fake reversal at the
+    # segment into it (and huge along-path detours). Skipping placeholders keeps the real slow
+    # point at x=140 braking correctly
+    points = [make_point(x, 0.0, 10.0 if x == 140 else 30.0) for x in range(0, 300, 20)]
+    points.insert(4, {"latitude": 0.0, "longitude": 0.0, "velocity": 0.0})
+    self.run_calculations(points, v_ego=20.0)
+    assert self.scc_m.v_target == 10.0
+    assert math.isclose(self.scc_m.target_lon, 140 * M_TO_DEG)
+    assert self.scc_m.target_lat == 0.0
+  # End BluePilot

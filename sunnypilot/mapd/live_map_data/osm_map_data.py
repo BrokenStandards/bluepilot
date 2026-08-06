@@ -9,7 +9,8 @@ import math
 import platform
 
 from cereal import log
-from openpilot.common.params import Params
+from openpilot.common.params import Params, UnknownKeyName
+from openpilot.common.swaglog import cloudlog
 from openpilot.sunnypilot.mapd.live_map_data.base_map_data import BaseMapData
 from openpilot.sunnypilot.navd.helpers import Coordinate
 
@@ -23,33 +24,59 @@ class OsmMapData(BaseMapData):
     super().__init__()
     self.mem_params = Params("/dev/shm/params") if platform.system() != "Darwin" else self.params
 
-    # BluePilot: Visual Routing Assistance toggle, cached and refreshed at ~5 s cadence
+    # BluePilot: Visual Routing Assistance toggle, cached and refreshed at ~5 s cadence.
+    # The new BP params may be unknown to an older compiled params library; each access is
+    # guarded so a missing key logs once, degrades that feature to inert and keeps the
+    # liveMapDataSP publisher alive.
     self._frame = 0
-    self._visual_routing_assist = self.params.get_bool("VisualRoutingAssist")
+    self._visual_routing_assist_supported = True
+    self._car_context_supported = True
+    self._speed_limit_guess_supported = True
+    self._visual_routing_assist = self._read_visual_routing_assist()
     # End BluePilot
+
+  # BluePilot: guarded VisualRoutingAssist read — False (inert) when the key is unknown
+  def _read_visual_routing_assist(self) -> bool:
+    if not self._visual_routing_assist_supported:
+      return False
+
+    try:
+      return self.params.get_bool("VisualRoutingAssist")
+    except UnknownKeyName:
+      cloudlog.warning("osm_map_data: VisualRoutingAssist param not registered in this build; visual routing assist stays disabled")
+      self._visual_routing_assist_supported = False
+      return False
+  # End BluePilot
 
   # BluePilot: 1 Hz car context for the mapd_bp divergence-based rematch.
   # mapd only uses it when enabled (VisualRoutingAssist); the kinematic fields are
   # published regardless so toggling the param doesn't need a mapd restart.
   def _update_car_context(self) -> None:
     if self._frame % PARAM_REFRESH_TICKS == 0:
-      self._visual_routing_assist = self.params.get_bool("VisualRoutingAssist")
+      self._visual_routing_assist = self._read_visual_routing_assist()
     self._frame += 1
+
+    if not self._car_context_supported:
+      return
 
     location = self.sm['liveLocationKalman']
     v_ego = float(location.velocityCalibrated.value[0]) if len(location.velocityCalibrated.value) else 0.0
     yaw_rate = float(location.angularVelocityCalibrated.value[2]) if len(location.angularVelocityCalibrated.value) > 2 else 0.0
     desired_curvature = float(self.sm['controlsState'].desiredCurvature) if self.sm.seen['controlsState'] else 0.0
 
-    self.mem_params.put("MapdCarContext", {
-      "enabled": self._visual_routing_assist,
-      "v_ego": v_ego,
-      "yaw_rate": yaw_rate,
-      # curvature = |yaw_rate| / max(v_ego, 1), signed by yaw_rate; the 1 m/s floor
-      # keeps the ratio bounded at parking speeds
-      "curvature": yaw_rate / max(v_ego, 1.0),
-      "desired_curvature": desired_curvature,
-    }, block=True)
+    try:
+      self.mem_params.put("MapdCarContext", {
+        "enabled": self._visual_routing_assist,
+        "v_ego": v_ego,
+        "yaw_rate": yaw_rate,
+        # curvature = |yaw_rate| / max(v_ego, 1), signed by yaw_rate; the 1 m/s floor
+        # keeps the ratio bounded at parking speeds
+        "curvature": yaw_rate / max(v_ego, 1.0),
+        "desired_curvature": desired_curvature,
+      }, block=True)
+    except UnknownKeyName:
+      cloudlog.warning("osm_map_data: MapdCarContext param not registered in this build; mapd car context stays disabled")
+      self._car_context_supported = False
   # End BluePilot
 
   def update_location(self) -> None:
@@ -80,9 +107,19 @@ class OsmMapData(BaseMapData):
   def get_current_speed_limit(self) -> float:
     return float(self.mem_params.get("MapSpeedLimit") or 0.0)
 
-  # BluePilot: mapd_bp writes its continuity-based guess for untagged ways here
+  # BluePilot: mapd_bp writes its continuity-based guess for untagged ways here;
+  # "no guess" when the key is unknown to this build's params library
   def get_speed_limit_guess(self) -> tuple[float, str]:
-    guess = self.mem_params.get("MapSpeedLimitGuess") or {}
+    if not self._speed_limit_guess_supported:
+      return 0.0, ""
+
+    try:
+      guess = self.mem_params.get("MapSpeedLimitGuess") or {}
+    except UnknownKeyName:
+      cloudlog.warning("osm_map_data: MapSpeedLimitGuess param not registered in this build; speed-limit guess stays disabled")
+      self._speed_limit_guess_supported = False
+      return 0.0, ""
+
     return float(guess.get('speedlimit', 0.0)), str(guess.get('source', ''))
   # End BluePilot
 

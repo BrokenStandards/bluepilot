@@ -26,12 +26,14 @@ TARGET_OFFSET = 1.0  # seconds - This controls how soon before the curve you rea
                      # done to keep the distance calculations consistent but results in the offset actually being less
                      # time than specified depending on how much of a speed differential there is between v_ego and the
                      # target velocity.
+# BluePilot: thresholds for the along-path distance walk and its U-turn/looped-chain truncation
 PATH_REVERSAL_DEGREES = 150.0  # degrees - a forward-path segment whose bearing reverses by more than this vs the
                                # previous segment is a looped/U-turn chain doubling back on itself (same threshold
                                # as mapd's next-way U-turn rejection); the road ahead never bends this sharply
                                # between adjacent points, so the forward path is truncated there.
 MIN_SEGMENT_DISTANCE = 0.1  # meters - segments shorter than this carry no meaningful bearing (duplicate or
                             # jittering points), so they are skipped when looking for a bearing reversal.
+# End BluePilot
 
 
 def velocities_from_param(param: str, params: Params):
@@ -68,6 +70,7 @@ def distance_to_point(ax, ay, bx, by):
   return R * c  # in meters
 
 
+# BluePilot: bearing helpers for the forward-path reversal truncation
 # points should be in radians
 # output is the initial bearing from a to b in degrees, in [-180, 180]
 def bearing_to_point(ax, ay, bx, by):
@@ -82,6 +85,27 @@ def bearing_to_point(ax, ay, bx, by):
 # output is the signed smallest angle from bearing a to bearing b in degrees, in [-180, 180)
 def bearing_delta(a, b):
   return (b - a + 180) % 360 - 180
+
+
+# the LastGPSPosition JSON (written by osm_map_data.update_location) also carries the
+# vehicle's own 'bearing'; it seeds the path-reversal walk so the FIRST forward segment
+# is checked against the reversal rule too. Returns None when the field is absent.
+def bearing_from_param(param: str, params: Params) -> float | None:
+  json_str = params.get(param)
+  if json_str is None:
+    return None
+
+  try:
+    pos = json.loads(json_str)
+  except (json.JSONDecodeError, TypeError):
+    return None
+
+  if not isinstance(pos, dict):
+    return None
+
+  bearing = pos.get('bearing')
+  return float(bearing) if isinstance(bearing, (int, float)) else None
+# End BluePilot
 
 
 class SmartCruiseControlMap:
@@ -129,6 +153,15 @@ class SmartCruiseControlMap:
 
     self.target_velocities = velocities_from_param("MapTargetVelocities", self.mem_params) or []
 
+    # BluePilot: mapd's GetTargetVelocities leaves (0,0,0) placeholder entries for zero-curvature
+    # points; a real 0 m/s target is never emitted, so drop them before they poison the
+    # nearest-point search, the along-path accumulation and the bearing walk.
+    self.target_velocities = [tv for tv in self.target_velocities if tv["velocity"] != 0]
+
+    # the vehicle's own bearing seeds the path-reversal truncation below; None when absent
+    ego_bearing = bearing_from_param("LastGPSPosition", self.mem_params)
+    # End BluePilot
+
     if self.last_position is None or self.target_velocities is None:
       return
 
@@ -150,12 +183,15 @@ class SmartCruiseControlMap:
     # only look at values from our current position forward
     forward_points = self.target_velocities[min_idx:]
 
-    # measure distance to each forward point along the road instead of as the crow flies: seed with the
-    # crow-flight distance to the nearest point, then accumulate point-to-point segment lengths. The walk
-    # stops at the first segment whose bearing reverses by more than PATH_REVERSAL_DEGREES vs the previous
-    # one - points past a reversal belong to a looped/U-turn chain doubling back on us, not the road ahead.
+    # BluePilot: measure distance to each forward point along the road instead of as the crow flies:
+    # seed with the crow-flight distance to the nearest point, then accumulate point-to-point segment
+    # lengths. The walk stops at the first segment whose bearing reverses by more than
+    # PATH_REVERSAL_DEGREES vs the previous one - points past a reversal belong to a looped/U-turn
+    # chain doubling back on us, not the road ahead. prev_bearing starts from the vehicle's own
+    # bearing (when known) so a reversal at the very FIRST forward segment - nearest point at a
+    # U-turn apex - is caught too; without it the check gracefully starts at the second segment.
     forward_distances = [distances[min_idx]] if forward_points else []
-    prev_bearing = None
+    prev_bearing = ego_bearing
     for i in range(1, len(forward_points)):
       alat = forward_points[i - 1]["latitude"] * TO_RADIANS
       alon = forward_points[i - 1]["longitude"] * TO_RADIANS
@@ -169,6 +205,7 @@ class SmartCruiseControlMap:
           break
         prev_bearing = bearing
       forward_distances.append(forward_distances[-1] + segment_distance)
+    # End BluePilot
 
     # find velocities that we are within the distance we need to adjust for
     valid_velocities = []

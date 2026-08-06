@@ -1,5 +1,7 @@
 package main
 
+import "math"
+
 // Speed-limit gap guessing: when the matched way has no tagged maxspeed, walk
 // the road graph along same-name/same-ref continuations in both directions and
 // report the nearest tagged values. The guess is published on its own mem param
@@ -15,6 +17,39 @@ const (
 	// unbounded in work even when the distance cap is not yet reached.
 	GUESS_MAX_WAY_HOPS = 40
 )
+
+// wayKey is the bbox-tuple identity used for way equality throughout this
+// package (see isSameWay); it keys the walk's visited set.
+type wayKey struct {
+	minLat, maxLat, minLon, maxLon float64
+}
+
+func keyOfWay(way Way) wayKey {
+	return wayKey{way.MinLat(), way.MaxLat(), way.MinLon(), way.MaxLon()}
+}
+
+// bearingChange returns the absolute continuation bearing change (radians,
+// 0..π) from the segment bearingNode->matchNode onto the candidate's first
+// traversed segment away from matchNode.
+func bearingChange(candidate Way, matchNode, bearingNode Coordinates) float64 {
+	nodes, err := candidate.Nodes()
+	if err != nil || nodes.Len() < 2 {
+		return math.Pi
+	}
+	var next Coordinates
+	if NextIsForward(candidate, matchNode) {
+		next = nodes.At(1)
+	} else {
+		next = nodes.At(nodes.Len() - 2)
+	}
+	inBearing := Bearing(bearingNode.Latitude(), bearingNode.Longitude(), matchNode.Latitude(), matchNode.Longitude())
+	outBearing := Bearing(matchNode.Latitude(), matchNode.Longitude(), next.Latitude(), next.Longitude())
+	delta := math.Mod(math.Abs(outBearing-inBearing), 2*math.Pi)
+	if delta > math.Pi {
+		delta = 2*math.Pi - delta
+	}
+	return delta
+}
 
 type SpeedLimitGuess struct {
 	Speedlimit       float64 `json:"speedlimit"`
@@ -62,6 +97,10 @@ func walkForTaggedSpeedLimit(startWay Way, offline Offline, walkForward bool, re
 	cur := startWay
 	curForward := walkForward
 	dist := 0.0
+	// Ways already traversed by this walk, keyed by the bbox-tuple identity
+	// used for way equality elsewhere (isSameWay). Without it a loop or
+	// roundabout of same-name ways could cycle the walk until the hop cap.
+	visited := map[wayKey]bool{keyOfWay(startWay): true}
 
 	for hops := 0; hops < GUESS_MAX_WAY_HOPS; hops++ {
 		nodes, err := cur.Nodes()
@@ -88,26 +127,38 @@ func walkForTaggedSpeedLimit(startWay Way, offline Offline, walkForward bool, re
 			return 0, 0
 		}
 
+		inAxisPoint := uTurnInAxisPoint(offline, cur, curForward)
+
+		// When multiple same-name/ref candidates connect at the hop node (e.g. a
+		// side street sharing the name), prefer the one that continues straightest
+		// instead of first-in-tile-order.
 		var next Way
 		found := false
+		bestBearingChange := math.Inf(1)
 		for _, mWay := range matchingWays {
+			if visited[keyOfWay(mWay)] {
+				continue
+			}
 			if !namesOrRefsMatch(mWay, name, ref) {
 				continue
 			}
-			if isUTurn(mWay, matchNode, bearingNode) {
+			if isUTurn(mWay, matchNode, inAxisPoint) {
 				continue
 			}
 			nextForward := NextIsForward(mWay, matchNode)
 			if !reverseWalk && !nextForward && mWay.OneWay() {
 				continue
 			}
-			next = mWay
-			found = true
-			break
+			if change := bearingChange(mWay, matchNode, bearingNode); change < bestBearingChange {
+				bestBearingChange = change
+				next = mWay
+				found = true
+			}
 		}
 		if !found {
 			return 0, 0
 		}
+		visited[keyOfWay(next)] = true
 
 		nextForward := NextIsForward(next, matchNode)
 		travelForward := nextForward
@@ -158,8 +209,10 @@ func ComputeSpeedLimitGuess(currentWay CurrentWay, offline Offline) SpeedLimitGu
 		return guess
 	}
 
-	guess.ForwardValue, guess.ForwardDistance = walkForTaggedSpeedLimit(way, offline, isForward, false, name, ref)
+	// Backward walk runs first: it wins value conflicts (below), so if any
+	// per-tick work budget runs out it should be the forward walk that starves.
 	guess.BackwardValue, guess.BackwardDistance = walkForTaggedSpeedLimit(way, offline, !isForward, true, name, ref)
+	guess.ForwardValue, guess.ForwardDistance = walkForTaggedSpeedLimit(way, offline, isForward, false, name, ref)
 
 	// The backward value wins on conflict: the car most recently passed that
 	// signage zone, and a differing forward value still surfaces through the

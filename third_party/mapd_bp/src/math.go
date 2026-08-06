@@ -73,6 +73,38 @@ type Curvature struct {
 	Curvature float64 `json:"curvature"`
 }
 
+// Median-crossover signature: a way boundary that switches between two-way and
+// oneway AND whose boundary-adjacent traversal segments are both shorter than
+// this (meters) is the node-split jog where a divided road's carriageways meet
+// (the short jog segments rotate toward each other and fake a sharp bend that
+// no traffic ever drives). Real curves have longer approach segments.
+const CROSSOVER_MAX_BOUNDARY_SEGMENT = 15.0
+
+// Curvature written into suppressed jog indices; same "basically straight"
+// value the merge/split flattening uses.
+const FLATTENED_CURVATURE = 0.0015
+
+// boundarySegmentLength returns the length (meters) of the way's traversal
+// segment adjacent to a chain boundary: the segment the chain leaves the way
+// on (entering=false) or enters it on (entering=true), given the way's
+// traversal direction. Returns +Inf when the way is degenerate so callers
+// never classify a boundary from missing data.
+func boundarySegmentLength(way Way, forward bool, entering bool) float64 {
+	nodes, err := way.Nodes()
+	if err != nil || nodes.Len() < 2 {
+		return math.Inf(1)
+	}
+	var a, b Coordinates
+	if forward == entering {
+		// Entering forward or leaving backward: segment at node-order start.
+		a, b = nodes.At(0), nodes.At(1)
+	} else {
+		// Leaving forward or entering backward: segment at node-order end.
+		a, b = nodes.At(nodes.Len()-2), nodes.At(nodes.Len()-1)
+	}
+	return DistanceToPoint(a.Latitude()*TO_RADIANS, a.Longitude()*TO_RADIANS, b.Latitude()*TO_RADIANS, b.Longitude()*TO_RADIANS)
+}
+
 func GetStateCurvatures(state *State) ([]Curvature, error) {
 	nodes, err := state.CurrentWay.Way.Nodes()
 	if err != nil {
@@ -82,6 +114,7 @@ func GetStateCurvatures(state *State) ([]Curvature, error) {
 	all_nodes := []capnp.StructList[Coordinates]{nodes}
 	all_nodes_direction := []bool{state.CurrentWay.OnWay.IsForward}
 	all_nodes_is_merge_or_split := []bool{false}
+	all_nodes_is_crossover := []bool{false}
 	lastWay := state.CurrentWay.Way
 	for _, nextWay := range state.NextWays {
 		nwNodes, err := nextWay.Way.Nodes()
@@ -91,6 +124,7 @@ func GetStateCurvatures(state *State) ([]Curvature, error) {
 		if nwNodes.Len() > 0 {
 			num_points += nwNodes.Len() - 1
 		}
+		lastForward := all_nodes_direction[len(all_nodes_direction)-1]
 		all_nodes = append(all_nodes, nwNodes)
 		all_nodes_direction = append(all_nodes_direction, nextWay.IsForward)
 		// Only treat a lane-count change as a merge/split when BOTH ways have a
@@ -102,6 +136,16 @@ func GetStateCurvatures(state *State) ([]Curvature, error) {
 			(lastWay.Lanes() < nextWay.Way.Lanes() ||
 				(lastWay.Lanes() > nextWay.Way.Lanes() && !lastWay.OneWay() && nextWay.Way.OneWay()))
 		all_nodes_is_merge_or_split = append(all_nodes_is_merge_or_split, isMergeOrSplit)
+		// Median-crossover signature (see CROSSOVER_MAX_BOUNDARY_SEGMENT): a
+		// two-way <-> oneway transition with very short boundary-adjacent
+		// segments on both sides. Only the curvature indices at/immediately
+		// adjacent to the boundary node get flattened — NOT a 15 m sweep, which
+		// would re-mask real curves that start right after the jog (the 31st Ave
+		// N crest curve peaks ~14 m from the crossover node).
+		isCrossover := lastWay.OneWay() != nextWay.Way.OneWay() &&
+			boundarySegmentLength(lastWay, lastForward, false) < CROSSOVER_MAX_BOUNDARY_SEGMENT &&
+			boundarySegmentLength(nextWay.Way, nextWay.IsForward, true) < CROSSOVER_MAX_BOUNDARY_SEGMENT
+		all_nodes_is_crossover = append(all_nodes_is_crossover, isCrossover)
 		lastWay = nextWay.Way
 	}
 
@@ -109,6 +153,7 @@ func GetStateCurvatures(state *State) ([]Curvature, error) {
 	y_points := make([]float64, num_points)
 
 	merge_or_split_nodes := []int{}
+	crossover_nodes := []int{}
 	all_nodes_idx := 0
 	nodes_idx := 0
 	for i := 0; i < num_points; i++ {
@@ -135,6 +180,9 @@ func GetStateCurvatures(state *State) ([]Curvature, error) {
 			nodes_idx = 0
 			if all_nodes_idx < len(all_nodes_is_merge_or_split) && all_nodes_is_merge_or_split[all_nodes_idx] {
 				merge_or_split_nodes = append(merge_or_split_nodes, i)
+			}
+			if all_nodes_idx < len(all_nodes_is_crossover) && all_nodes_is_crossover[all_nodes_idx] {
+				crossover_nodes = append(crossover_nodes, i)
 			}
 		}
 	}
@@ -163,6 +211,23 @@ func GetStateCurvatures(state *State) ([]Curvature, error) {
 				break
 			}
 			curvatures[i] = 0.0015
+		}
+	}
+
+	// Suppress the median-crossover jog artifact: flatten ONLY the curvature
+	// samples centered on the boundary node and the node immediately before it
+	// (curvatures[k] is centered on point k+1, so centers b-1 and b are
+	// indices b-2 and b-1). Those two triples have BOTH legs inside the
+	// crossover jog and carry the phantom bend. Deliberately narrower than the
+	// merge/split 15 m sweep above — the sample centered one node past the
+	// boundary already overlaps the real curve the crossover sits on (the 31st
+	// Ave N crest curve peaks ~14 m from the crossover node) and must stay
+	// visible in the published targets.
+	for _, b := range crossover_nodes {
+		for k := b - 2; k <= b-1; k++ {
+			if k >= 0 && k < len(curvatures) {
+				curvatures[k] = FLATTENED_CURVATURE
+			}
 		}
 	}
 

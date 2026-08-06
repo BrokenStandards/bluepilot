@@ -51,12 +51,29 @@ var HIGHWAY_RANK = map[string]int{
 // Bearing alignment thresholds
 const ACCEPTABLE_BEARING_DELTA_SIN = 0.7071067811865475 // sin(45°) - max acceptable bearing mismatch
 
-// A next-way candidate is a U-turn when the bearing of its first traversed
-// segment reverses the bearing of the current way's final traversed segment by
-// more than 150°. cos(150°) = -0.866; anything below that is a direction
-// reversal onto e.g. the opposite carriageway of a divided road, which chains
-// must never follow.
+// A next-way candidate is a U-turn when the ROAD-AXIS bearing of the
+// continuation onto it reverses the road-axis bearing of the approach by more
+// than 150°. cos(150°) = -0.866; anything below that is a direction reversal
+// onto e.g. the opposite carriageway of a divided road, which chains must
+// never follow.
 const U_TURN_BEARING_DELTA_COS = -0.866
+
+// U_TURN_AXIS_DIST is the along-road distance (meters) each side of the
+// junction is walked to establish its road-axis bearing before the U-turn
+// test. Single adjacent-segment bearings under-measure the reversal at
+// divided-carriageway crossover junctions: the ~9 m median-crossover jog
+// segments rotate ~30-45° toward each other, so a true 180° carriageway
+// reversal can measure only ~117-127° and slip past the 150° threshold. 30 m
+// is long enough to swallow the jog (crossover jogs are of the order of a
+// road width, ~10-15 m) while staying local enough that ordinary same-name
+// corners keep their true turn angle.
+const U_TURN_AXIS_DIST = 30.0
+
+// U_TURN_AXIS_MAX_HOPS bounds how many additional connected same-name ways
+// the approach-axis walk may continue into when the from-way itself is
+// shorter than U_TURN_AXIS_DIST (dual carriageways are often chopped into
+// tiny ways right at crossover junctions).
+const U_TURN_AXIS_MAX_HOPS = 2
 
 type OnWayResult struct {
 	OnWay     bool
@@ -682,6 +699,10 @@ func NextWay(way Way, offline Offline, isForward bool) (NextWayResult, error) {
 		return NextWayResult{}, nil
 	}
 
+	// Road-axis approach point for the U-turn test; computed once per junction,
+	// shared by every candidate check below.
+	inAxisPoint := uTurnInAxisPoint(offline, way, isForward)
+
 	matchingWays, err := MatchingWays(way, offline, matchNode)
 	if err != nil {
 		return NextWayResult{StartPosition: matchNode}, errors.Wrap(err, "could not check for next ways")
@@ -728,7 +749,7 @@ func NextWay(way Way, offline Offline, isForward bool) (NextWayResult, error) {
 				if !isForward && mWay.OneWay() {
 					continue
 				}
-				if isUTurn(mWay, matchNode, matchBearingNode) {
+				if isUTurn(mWay, matchNode, inAxisPoint) {
 					continue
 				}
 
@@ -764,7 +785,7 @@ func NextWay(way Way, offline Offline, isForward bool) (NextWayResult, error) {
 				if !isForward && mWay.OneWay() {
 					continue
 				}
-				if isUTurn(mWay, matchNode, matchBearingNode) {
+				if isUTurn(mWay, matchNode, inAxisPoint) {
 					continue
 				}
 
@@ -807,7 +828,7 @@ func NextWay(way Way, offline Offline, isForward bool) (NextWayResult, error) {
 				if !isForward && mWay.OneWay() {
 					continue
 				}
-				if isUTurn(mWay, matchNode, matchBearingNode) {
+				if isUTurn(mWay, matchNode, inAxisPoint) {
 					continue
 				}
 
@@ -836,7 +857,7 @@ func NextWay(way Way, offline Offline, isForward bool) (NextWayResult, error) {
 		if !isForward && mWay.OneWay() {
 			continue
 		}
-		if isUTurn(mWay, matchNode, matchBearingNode) {
+		if isUTurn(mWay, matchNode, inAxisPoint) {
 			continue
 		}
 		if nodes.Len() > 1 && isValidConnection(mWay, matchNode, matchBearingNode, curvatureThreshold) {
@@ -859,7 +880,7 @@ func NextWay(way Way, offline Offline, isForward bool) (NextWayResult, error) {
 	// Last-resort fallback still must not chain onto a direction reversal: a
 	// missing next way is safer than a phantom target on the opposite carriageway.
 	for _, mWay := range matchingWays {
-		if isUTurn(mWay, matchNode, matchBearingNode) {
+		if isUTurn(mWay, matchNode, inAxisPoint) {
 			continue
 		}
 		nextIsForward := NextIsForward(mWay, matchNode)
@@ -875,20 +896,104 @@ func NextWay(way Way, offline Offline, isForward bool) (NextWayResult, error) {
 	return NextWayResult{StartPosition: matchNode}, nil
 }
 
-// isUTurn reports whether continuing from the current way's final traversed
-// segment (bearingNode -> matchNode) onto the candidate's first traversed
-// segment (matchNode -> its next node in traversal order) reverses direction
-// by more than 150° (see U_TURN_BEARING_DELTA_COS). The junction-curvature
-// check in isValidConnection cannot catch these: with ~100 m legs and a few
-// meters of lateral offset the circumcircle through the three nodes of a
-// hairpin is nearly flat, so divided-road U-turns pass every curvature
-// threshold while physically requiring a direction reversal.
-func isUTurn(candidate Way, matchNode, bearingNode Coordinates) bool {
-	// No bearing context (single-node current way) -> cannot judge, do not reject.
-	if !capnp.Struct(bearingNode).IsValid() || !capnp.Struct(matchNode).IsValid() {
+// axisEndpoint walks the node list from startIdx in direction step (+1/-1),
+// accumulating along-road distance until at least minDist meters, and returns
+// the node reached plus the distance actually accumulated (clamped at the way
+// end when the way is shorter than minDist).
+func axisEndpoint(nodes capnp.StructList[Coordinates], startIdx int, step int, minDist float64) (Coordinates, float64) {
+	point := nodes.At(startIdx)
+	dist := 0.0
+	for i := startIdx + step; i >= 0 && i < nodes.Len(); i += step {
+		next := nodes.At(i)
+		dist += DistanceToPoint(point.Latitude()*TO_RADIANS, point.Longitude()*TO_RADIANS, next.Latitude()*TO_RADIANS, next.Longitude()*TO_RADIANS)
+		point = next
+		if dist >= minDist {
+			break
+		}
+	}
+	return point, dist
+}
+
+// uTurnInAxisPoint returns the road-axis reference point that lies at least
+// U_TURN_AXIS_DIST meters BEHIND the junction node, found by walking the
+// from-way backward along its traversal direction. When the from-way itself is
+// shorter than the axis distance (dual carriageways are chopped into tiny ways
+// right at crossover junctions, e.g. the 10.8 m crest stub of 31st Ave N), the
+// walk continues into the unique connected same-name way at the reached end,
+// up to U_TURN_AXIS_MAX_HOPS extra ways; ambiguity (0 or >1 same-name
+// continuations) or a missing name clamps the walk conservatively where it is.
+// The returned point may equal the junction node for degenerate ways; callers
+// must treat that as "no bearing context".
+func uTurnInAxisPoint(offline Offline, fromWay Way, fromForward bool) Coordinates {
+	nodes, err := fromWay.Nodes()
+	if err != nil || nodes.Len() < 2 {
+		return Coordinates{}
+	}
+	startIdx, step := nodes.Len()-1, -1
+	if !fromForward {
+		startIdx, step = 0, 1
+	}
+	point, dist := axisEndpoint(nodes, startIdx, step, U_TURN_AXIS_DIST)
+
+	name, _ := fromWay.Name()
+	cur := fromWay
+	for hops := 0; dist < U_TURN_AXIS_DIST && hops < U_TURN_AXIS_MAX_HOPS; hops++ {
+		if len(name) == 0 {
+			break
+		}
+		matching, err := MatchingWays(cur, offline, point)
+		if err != nil {
+			break
+		}
+		var next Way
+		sameName := 0
+		for _, m := range matching {
+			mName, err := m.Name()
+			if err != nil || mName != name {
+				continue
+			}
+			sameName++
+			next = m
+		}
+		if sameName != 1 {
+			break
+		}
+		nNodes, err := next.Nodes()
+		if err != nil || nNodes.Len() < 2 {
+			break
+		}
+		sIdx, sStep := nNodes.Len()-1, -1
+		first := nNodes.At(0)
+		if first.Latitude() == point.Latitude() && first.Longitude() == point.Longitude() {
+			sIdx, sStep = 0, 1
+		}
+		var d float64
+		point, d = axisEndpoint(nNodes, sIdx, sStep, U_TURN_AXIS_DIST-dist)
+		dist += d
+		cur = next
+	}
+	return point
+}
+
+// isUTurn reports whether continuing through the junction at matchNode onto
+// the candidate reverses the road's axis by more than 150° (see
+// U_TURN_BEARING_DELTA_COS). Both sides are measured as ROAD-AXIS chord
+// bearings over at least U_TURN_AXIS_DIST meters of along-road distance:
+// inAxisPoint (see uTurnInAxisPoint) -> matchNode for the approach, and
+// matchNode -> a point walked U_TURN_AXIS_DIST along the candidate in its
+// traversal direction (per NextIsForward, clamped at the candidate's end) for
+// the continuation. Single adjacent-segment bearings are NOT sufficient: at
+// divided-carriageway crossover junctions the ~9 m median jog segments rotate
+// toward each other and shave a true 180° reversal down to ~117-127°. The
+// junction-curvature check in isValidConnection cannot catch reversals
+// either: with ~100 m legs and a few meters of lateral offset the
+// circumcircle through the three junction nodes of a hairpin is nearly flat.
+func isUTurn(candidate Way, matchNode, inAxisPoint Coordinates) bool {
+	// No bearing context (degenerate from-way) -> cannot judge, do not reject.
+	if !capnp.Struct(inAxisPoint).IsValid() || !capnp.Struct(matchNode).IsValid() {
 		return false
 	}
-	if bearingNode.Latitude() == matchNode.Latitude() && bearingNode.Longitude() == matchNode.Longitude() {
+	if inAxisPoint.Latitude() == matchNode.Latitude() && inAxisPoint.Longitude() == matchNode.Longitude() {
 		return false
 	}
 	nodes, err := candidate.Nodes()
@@ -896,17 +1001,19 @@ func isUTurn(candidate Way, matchNode, bearingNode Coordinates) bool {
 		return false
 	}
 
-	// First node reached after matchNode when traversing the candidate in the
-	// direction the chain would actually drive it (see NextIsForward).
-	var next Coordinates
-	if NextIsForward(candidate, matchNode) {
-		next = nodes.At(1)
-	} else {
-		next = nodes.At(nodes.Len() - 2)
+	// Walk the candidate away from matchNode in the direction the chain would
+	// actually drive it (see NextIsForward).
+	startIdx, step := 0, 1
+	if !NextIsForward(candidate, matchNode) {
+		startIdx, step = nodes.Len()-1, -1
+	}
+	outPoint, _ := axisEndpoint(nodes, startIdx, step, U_TURN_AXIS_DIST)
+	if outPoint.Latitude() == matchNode.Latitude() && outPoint.Longitude() == matchNode.Longitude() {
+		return false
 	}
 
-	inBearing := Bearing(bearingNode.Latitude(), bearingNode.Longitude(), matchNode.Latitude(), matchNode.Longitude())
-	outBearing := Bearing(matchNode.Latitude(), matchNode.Longitude(), next.Latitude(), next.Longitude())
+	inBearing := Bearing(inAxisPoint.Latitude(), inAxisPoint.Longitude(), matchNode.Latitude(), matchNode.Longitude())
+	outBearing := Bearing(matchNode.Latitude(), matchNode.Longitude(), outPoint.Latitude(), outPoint.Longitude())
 	return math.Cos(outBearing-inBearing) < U_TURN_BEARING_DELTA_COS
 }
 

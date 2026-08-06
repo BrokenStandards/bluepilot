@@ -16,7 +16,7 @@ import (
 
 // Fork version. The authoritative copy consumed by the Python installer is the
 // VERSION file next to the binaries; keep both in sync.
-const VERSION = "v1.12.0-bp1"
+const VERSION = "v1.12.0-bp2"
 
 type State struct {
 	Data                   []uint8
@@ -84,6 +84,17 @@ func readOffline(data []uint8) Offline {
 	msg, err := capnp.UnmarshalPacked(data)
 	logde(errors.Wrap(err, "could not unmarshal offline data"))
 	if err == nil {
+		// Lift the per-Message capnp read-traversal budget (default 64 MiB per
+		// Message). The budget exists to stop maliciously nested REMOTE payloads
+		// from pinning the CPU, but this tile is locally generated trusted data
+		// with bounded, non-recursive structure — the only thing the budget does
+		// here is count every re-read: each MatchingWays graph hop re-reads every
+		// way's node list (~3.6 MiB per scan on an 11k-way tile), so the
+		// speed-limit-guess walk alone exhausted 64 MiB after ~18 scans and every
+		// later read this tick (curvatures, road name, next speed limit) silently
+		// returned empty structs. MaxUint64 makes the budget effectively
+		// unlimited for the lifetime of this Message.
+		msg.ResetReadLimit(math.MaxUint64)
 		offline, err := ReadRootOffline(msg)
 		logde(errors.Wrap(err, "could not read offline message"))
 		return offline
@@ -302,6 +313,9 @@ func loop(state *State) {
 	if roadInfoChanged {
 		state.LastWayChange = time.Now()
 		state.StableWayCounter = 0
+		// A divergence streak must never span two different match hypotheses:
+		// ticks accumulated against the old way say nothing about the new one.
+		state.DivergenceTicks = 0
 		state.LastSpeedLimitDistance = 0
 		state.LastSpeedLimitValue = 0
 		state.LastSpeedLimitWayName = ""

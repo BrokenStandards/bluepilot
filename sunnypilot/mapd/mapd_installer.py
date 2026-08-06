@@ -7,6 +7,9 @@ See the LICENSE.md file in the root directory for more details.
 """
 import logging
 import os
+# BluePilot: platform gates the arm64-only fallback download to aarch64 devices
+import platform
+# End BluePilot
 import stat
 import time
 import traceback
@@ -43,6 +46,17 @@ def _read_committed_version() -> str:
 
 
 VERSION = _read_committed_version()
+
+
+# the pfeiferj release asset is built for arm64 only, while MAPD_PATH is arch-aware;
+# verify a downloaded payload really is an aarch64 ELF before it may replace MAPD_PATH
+EM_AARCH64 = 183  # ELF e_machine value for aarch64
+
+
+def _is_aarch64_elf(content: bytes) -> bool:
+  if len(content) < 20 or content[:4] != b'\x7fELF':
+    return False
+  return int.from_bytes(content[18:20], 'little') == EM_AARCH64
 # End BluePilot
 
 
@@ -59,10 +73,17 @@ class MapdInstallManager:
     self._params = Params()
 
   def download(self) -> None:
+    # BluePilot: the fallback release asset is arm64-only. On any other architecture skip the
+    # download entirely — the committed binary from scripts/build_mapd.sh is the only valid
+    # source — and leave the MapdVersion param untouched.
+    if platform.machine() != 'aarch64':
+      logging.error(f"mapd binary missing at {MAPD_PATH} and the pfeiferj fallback is arm64-only; run scripts/build_mapd.sh for {platform.machine()}")
+      return
     self.ensure_directories_exist()
-    self._download_file()
-    # BluePilot: the fallback download serves the stock pfeiferj release, so record its version
-    update_installed_version(FALLBACK_VERSION, self._params)
+    # the fallback download serves the stock pfeiferj release; record its version only
+    # when a verified aarch64 binary was actually installed
+    if self._download_file():
+      update_installed_version(FALLBACK_VERSION, self._params)
     # End BluePilot
 
   def check_and_download(self) -> None:
@@ -94,17 +115,23 @@ class MapdInstallManager:
     current_permissions = stat.S_IMODE(os.lstat(file_path).st_mode)
     os.chmod(file_path, current_permissions | stat.S_IEXEC)
 
-  def _download_file(self, num_retries=5) -> None:
+  # BluePilot: returns True only when a verified aarch64 ELF was installed at MAPD_PATH
+  def _download_file(self, num_retries=5) -> bool:
     temp_file = Path(MAPD_PATH + ".tmp")
     download_timeout = 60
     for cnt in range(num_retries):
       try:
         response = requests.get(URL, stream=True, timeout=download_timeout)
         response.raise_for_status()
+        # the release asset must be an aarch64 ELF; a wrong payload will never fix itself
+        # on retry, so refuse it and bail out without touching MAPD_PATH
+        if not _is_aarch64_elf(response.content):
+          logging.error("Downloaded mapd fallback is not an aarch64 ELF; refusing to install it. Run scripts/build_mapd.sh instead.")
+          break
         self._safe_write_and_set_executable(temp_file, response.content)
         # No exceptions encountered. Safe to replace original file.
         temp_file.replace(MAPD_PATH)
-        return
+        return True
       except requests.exceptions.ReadTimeout:
         self._spinner.update(f"ReadTimeout caught. Timeout is [{download_timeout}]. Retrying download... [{cnt}]")
         time.sleep(0.5)
@@ -116,6 +143,8 @@ class MapdInstallManager:
     if temp_file.exists():
       temp_file.unlink()
     logging.error("Failed to download file after all retries")
+    return False
+  # End BluePilot
 
   def get_installed_version(self) -> str:
     return str(self._params.get("MapdVersion") or "")
