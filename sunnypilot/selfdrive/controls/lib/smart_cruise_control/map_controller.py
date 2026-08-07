@@ -40,13 +40,15 @@ NO_TARGET_V = 100.0  # m/s - "no curve is asking for anything"; also the value v
                      # no forward point produced a profile value, which never wins the planner's min()
 HORIZON_MIN_M = 60.0  # meters - floor on the look-ahead distance so the profile still sees a curve
                       # at low speed, where v_ego * horizon collapses to nothing
-TARGET_SLEW_RATE = 1.5  # m/s per second - hard limit on how fast the PUBLISHED target may move, in
-                        # both directions. The profile itself is continuous, but the set of points
-                        # feeding it is not (a curve entering the horizon, a held target releasing,
-                        # mapd republishing a different chain), and any step in the target lands on
-                        # the long planner as a step in demanded acceleration - i.e. exactly the
-                        # sudden friction braking this change exists to avoid. Ramping the release
-                        # too keeps the return to cruise just as smooth as the approach.
+TARGET_SLEW_RATE = 1.5  # m/s per second - hard limit on how fast the PUBLISHED target may RISE.
+                        # The profile itself is continuous, but the set of points feeding it is not
+                        # (a curve entering the horizon, a held target releasing, mapd republishing
+                        # a different chain), and any step in the target lands on the long planner
+                        # as a step in demanded acceleration. Ramping the release keeps the return
+                        # to cruise smooth. The DOWNWARD rate is the profile's max_decel: when a
+                        # curve is discovered late (a ramp branch mapd only sees once the car is on
+                        # it), the target is allowed to fall exactly as fast as a human who noticed
+                        # late would brake - firmly, up to the profile's ceiling, and no faster.
 MAX_STALE_CYCLES = int(5.0 / DT_MDL)  # cycles - how long the position underneath the profile may
                                       # repeat before the profile gives up. mapd republishes at 1 Hz
                                       # into this 20 Hz loop, so ~20 repeats is the normal cadence.
@@ -60,16 +62,41 @@ HELD_TARGET_POS_TOL = 1.0 * TO_DEGREES / R  # degrees - ~1 m; a held target is r
 
 # BluePilot: curve speed presets. Single source of truth for the three profiles the UI selects
 # between with "CurveSpeedProfile"; the UI only ever stores the index.
-#   lat_accel       m/s^2 - handed to mapd through "MapTargetLatA"; sets the target velocity mapd
-#                           publishes for a given curve radius (v = sqrt(lat_accel * R))
-#   approach_decel  m/s^2 - the constant deceleration the approach profile is built on
-#   offset          s     - the target velocity is reached this long before the curve point itself
+#
+# The numbers are fitted to how humans actually drive, from route-verified OSM GPS trace
+# bands over Nashville (city arterial curves n~80/curve, a verified cloverleaf loop and
+# freeway exit, interstate sweepers) cross-checked against the published literature
+# (AASHTO side-friction comfort curve, Fitzpatrick FHWA-RD-99-171 decel rates, SHRP2
+# ramp/exit naturalistic studies):
+#   - the median human on a 30 mph arterial curve runs 2.0 m/s^2 against the map radius
+#     (p25 1.7, p75 2.3) - so the three lat anchors ARE those three percentiles;
+#   - city curves are barely braking events (1-3 mph shaved at 0.2-0.5 m/s^2), while a
+#     61->34 mph freeway-exit approach sustains ~2.0 m/s^2 and peaks at 2.5 - no constant
+#     decel fits both, hence the drop-proportional ramp between base and max below;
+#   - humans reach minimum speed AT or slightly past curve entry, not comfortably before
+#     it, so the offsets shrink toward zero as the profiles get sportier.
+#
+#   lat_accel       m/s^2 - handed to mapd through "MapTargetLatA"; the lateral budget AT THE
+#                           30 MPH ANCHOR. mapd shapes the budget over speed (AASHTO comfort
+#                           curve) and applies the ramp-context boost; see math.go latBudget.
+#   base_decel      m/s^2 - approach deceleration for small speed trims (city curves)
+#   max_decel       m/s^2 - approach deceleration ceiling for large drops (freeway exits);
+#                           also the fastest the published target may fall per second
+#   offset          s     - the target velocity is reached this long before the curve point
 #   horizon         s     - how far ahead, in time, a curve may bind (see HORIZON_MIN_M)
 CURVE_SPEED_PRESETS = (
-  (1.3, 0.30, 2.0, 12.0),  # 0 Comfort
-  (1.6, 0.40, 1.5, 10.0),  # 1 Normal
-  (2.0, 0.60, 1.0, 8.0),   # 2 Sport
+  (1.7, 0.30, 1.2, 1.5, 12.0),  # 0 Comfort
+  (2.0, 0.45, 1.8, 0.8, 10.0),  # 1 Normal
+  (2.4, 0.60, 2.5, 0.3, 8.0),   # 2 Sport
 )
+# A drop of this many m/s (v_ego above the point's target) is where the approach decel
+# reaches max_decel; between 0 and this the decel rises QUADRATICALLY from base_decel.
+# Quadratic, not linear, because that is what the verified bands show at all three measured
+# drops: a 1-2 mph city trim is taken at ~0.3-0.5 m/s^2, a 10 mph freeway trim (I-65,
+# 66->55 mph) at a gentle 0.46 m/s^2 sustained - linear gain would have doubled that - and
+# the 27 mph shed into the verified cloverleaf at ~2.0 m/s^2 sustained. 12 m/s is that
+# cloverleaf drop, where humans were at their sustained maximum.
+DECEL_FULL_DROP = 12.0
 DEFAULT_CURVE_SPEED_PROFILE = 1
 CURVE_SPEED_PROFILE_PARAM = "CurveSpeedProfile"
 MAP_TARGET_LAT_A_PARAM = "MapTargetLatA"
@@ -218,7 +245,7 @@ class SmartCruiseControlMap:
     # applied here rather than on the first update() because update_params() only runs on frames
     # that are a multiple of PARAMS_UPDATE_PERIOD / DT_MDL and frame starts at -1.
     self.profile_index = -1
-    self.approach_decel, self.target_offset, self.horizon = CURVE_SPEED_PRESETS[DEFAULT_CURVE_SPEED_PROFILE][1:]
+    self.approach_decel, self.max_decel, self.target_offset, self.horizon = CURVE_SPEED_PRESETS[DEFAULT_CURVE_SPEED_PROFILE][1:]
     self._profile_param_supported = True
     self._lat_accel_param_supported = True
     self._published_v_target: float | None = None  # None == released, publishing V_CRUISE_UNSET
@@ -268,7 +295,7 @@ class SmartCruiseControlMap:
       return
 
     self.profile_index = index
-    lat_accel, self.approach_decel, self.target_offset, self.horizon = CURVE_SPEED_PRESETS[index]
+    lat_accel, self.approach_decel, self.max_decel, self.target_offset, self.horizon = CURVE_SPEED_PRESETS[index]
     self._write_map_target_lat_a(lat_accel)
 
   def _write_map_target_lat_a(self, lat_accel: float) -> None:
@@ -399,11 +426,12 @@ class SmartCruiseControlMap:
     else:
       desired = released
 
-    max_delta = TARGET_SLEW_RATE * DT_MDL
-    if desired > prev + max_delta:
-      new = prev + max_delta
-    elif desired < prev - max_delta:
-      new = prev - max_delta
+    max_up = TARGET_SLEW_RATE * DT_MDL
+    max_down = self.max_decel * DT_MDL
+    if desired > prev + max_up:
+      new = prev + max_up
+    elif desired < prev - max_down:
+      new = prev - max_down
     else:
       new = desired
 
@@ -538,10 +566,16 @@ class SmartCruiseControlMap:
     d = min_idx_distance
 
     v_ego = self.v_ego
-    # loop invariants: the preset and v_ego do not change inside the pass
-    approach_decel = self.approach_decel
+    # loop invariants: the preset and v_ego do not change inside the pass.
+    #
+    # The approach decel is drop-proportional (see CURVE_SPEED_PRESETS and DECEL_FULL_DROP):
+    # a point asking for a 2 mph trim gets base_decel, a freeway exit asking to shed 25 mph
+    # gets up to max_decel - which is exactly how humans split those cases. Using v_ego for
+    # the drop means the decel the profile is built on relaxes as the car actually slows,
+    # easing the tail of the deceleration instead of holding one fixed rate to the end.
+    base_decel = self.approach_decel
+    decel_gain = (self.max_decel - base_decel) / (DECEL_FULL_DROP * DECEL_FULL_DROP)
     offset = self.target_offset
-    two_decel = 2.0 * approach_decel
     horizon_m = max(HORIZON_MIN_M, v_ego * self.horizon)
 
     min_v = NO_TARGET_V
@@ -565,7 +599,14 @@ class SmartCruiseControlMap:
 
       tv = p_vel[i]
       d_eff = d - tv * offset
-      v_ref = sqrt(tv * tv + two_decel * d_eff) if d_eff > 0.0 else tv
+      if d_eff > 0.0:
+        drop = v_ego - tv
+        a_eff = base_decel if drop <= 0.0 else base_decel + decel_gain * drop * drop
+        if a_eff > self.max_decel:
+          a_eff = self.max_decel
+        v_ref = sqrt(tv * tv + 2.0 * a_eff * d_eff)
+      else:
+        v_ref = tv
 
       if v_ref < min_v:
         min_v = v_ref

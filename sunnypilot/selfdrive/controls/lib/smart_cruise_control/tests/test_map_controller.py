@@ -19,6 +19,7 @@ from openpilot.selfdrive.car.cruise import V_CRUISE_UNSET
 from openpilot.sunnypilot.selfdrive.controls.lib.smart_cruise_control import MIN_V
 from openpilot.sunnypilot.selfdrive.controls.lib.smart_cruise_control.map_controller import (
   CURVE_SPEED_PRESETS,
+  DECEL_FULL_DROP,
   DEFAULT_CURVE_SPEED_PROFILE,
   HOLD_RELEASE_DISTANCE,
   HORIZON_MIN_M,
@@ -41,7 +42,7 @@ WAY_V = 30.0  # the "nothing is asking for a slowdown here" velocity every fille
               # nearest point sits at d_eff <= 0, so its profile value is its own target velocity),
               # which is what "no phantom braking" now looks like: nothing below the way's own limit.
 
-# the three presets, by name, as (lat_accel, approach_decel, offset, horizon)
+# the three presets, by name, as (lat_accel, base_decel, max_decel, offset, horizon)
 COMFORT, NORMAL, SPORT = CURVE_SPEED_PRESETS
 
 
@@ -50,17 +51,29 @@ def make_point(x, y, v):
   return {"latitude": y * M_TO_DEG, "longitude": x * M_TO_DEG, "velocity": v}
 
 
-def v_ref(tv, d, preset=NORMAL):
+def a_eff(tv, v_ego, preset=NORMAL):
+  """Drop-proportional approach decel: base for small trims, rising quadratically to max at
+  DECEL_FULL_DROP (the shape the verified human bands show at city/freeway/loop drops)."""
+  _, base_decel, max_decel, _, _ = preset
+  drop = v_ego - tv
+  if drop <= 0.0:
+    return base_decel
+  return min(max_decel, base_decel + (max_decel - base_decel) / DECEL_FULL_DROP ** 2 * drop * drop)
+
+
+def v_ref(tv, d, preset=NORMAL, v_ego=None):
   """The approach profile: the speed the car may be doing now to reach tv at a point d metres away."""
-  _, approach_decel, offset, _ = preset
+  _, _, _, offset, _ = preset
   d_eff = max(0.0, d - tv * offset)
-  return math.sqrt(tv ** 2 + 2.0 * approach_decel * d_eff)
+  a = a_eff(tv, v_ego if v_ego is not None else tv, preset)
+  return math.sqrt(tv ** 2 + 2.0 * a * d_eff)
 
 
-def bind_distance(v_cruise, tv, preset=NORMAL):
+def bind_distance(v_cruise, tv, preset=NORMAL, v_ego=None):
   """Distance at which the profile for a tv curve first drops to v_cruise, i.e. where it starts to bind."""
-  _, approach_decel, offset, _ = preset
-  return (v_cruise ** 2 - tv ** 2) / (2.0 * approach_decel) + tv * offset
+  _, _, _, offset, _ = preset
+  a = a_eff(tv, v_ego if v_ego is not None else v_cruise, preset)
+  return (v_cruise ** 2 - tv ** 2) / (2.0 * a) + tv * offset
 # End BluePilot
 
 
@@ -148,12 +161,13 @@ class TestSmartCruiseControlMap:
   # points' own velocity), which never wins the planner's min() against a sane set speed.
   def test_single_curve_slowdown(self):
     # regression: a slow point straight ahead inside the horizon still produces a target, and it
-    # is that point's profile value - well above tv while still 140 m out, so the car is held
-    # from accelerating rather than asked to brake
+    # is that point's profile value - well above tv while still 140 m out (with a 10 m/s drop the
+    # drop-proportional decel is nearer max than base, so the profile only starts to bind close
+    # in, the way the freeway-exit traces do), so nothing is asking for the brakes yet
     points = [make_point(x, 0.0, 10.0 if x == 140 else WAY_V) for x in range(0, 300, 20)]
     self.run_calculations(points, v_ego=20.0)
-    assert self.scc_m.v_target == pytest.approx(v_ref(10.0, 140.0))
-    assert 10.0 < self.scc_m.v_target < 20.0
+    assert self.scc_m.v_target == pytest.approx(v_ref(10.0, 140.0, v_ego=20.0))
+    assert 10.0 < self.scc_m.v_target < WAY_V
     assert math.isclose(self.scc_m.target_lon, 140 * M_TO_DEG)
     assert self.scc_m.target_lat == 0.0
 
@@ -203,14 +217,14 @@ class TestSmartCruiseControlMap:
     points = [make_point(0.0, 0.0, WAY_V)]
     points += [make_point(-x, 2.0, 5.0) for x in (30, 80, 130)]
     self.run_calculations(points, v_ego=25.0)
-    assert self.scc_m.v_target == pytest.approx(v_ref(5.0, 30.0), rel=1e-3)
+    assert self.scc_m.v_target == pytest.approx(v_ref(5.0, math.hypot(30.0, 2.0), v_ego=25.0), rel=1e-3)
 
   def test_forward_path_with_bearing_still_brakes(self):
     # the vehicle-bearing seed must not truncate a normal forward path: car heading east with the
     # chain heading east keeps the slow point at x=140 as the profile's governing point
     points = [make_point(x, 0.0, 10.0 if x == 140 else WAY_V) for x in range(0, 300, 20)]
     self.run_calculations(points, v_ego=20.0, bearing=90.0)
-    assert self.scc_m.v_target == pytest.approx(v_ref(10.0, 140.0))
+    assert self.scc_m.v_target == pytest.approx(v_ref(10.0, 140.0, v_ego=20.0))
     assert math.isclose(self.scc_m.target_lon, 140 * M_TO_DEG)
 
   def test_placeholder_entries_skipped(self):
@@ -221,7 +235,7 @@ class TestSmartCruiseControlMap:
     points = [make_point(x, 0.0, 10.0 if x == 140 else WAY_V) for x in range(0, 300, 20)]
     points.insert(4, {"latitude": 0.0, "longitude": 0.0, "velocity": 0.0})
     self.run_calculations(points, v_ego=20.0)
-    assert self.scc_m.v_target == pytest.approx(v_ref(10.0, 140.0))
+    assert self.scc_m.v_target == pytest.approx(v_ref(10.0, 140.0, v_ego=20.0))
     assert math.isclose(self.scc_m.target_lon, 140 * M_TO_DEG)
     assert self.scc_m.target_lat == 0.0
   # End BluePilot
@@ -234,7 +248,7 @@ class TestSmartCruiseControlMap:
     points = [make_point(x, 0.0, 10.0 if x == 140 else WAY_V) for x in range(0, 300, 20)]
     self.run_calculations(points, v_ego=20.0)
     first = self.target
-    assert first[0] == pytest.approx(v_ref(10.0, 140.0))
+    assert first[0] == pytest.approx(v_ref(10.0, 140.0, v_ego=20.0))
 
     # the other 19 cycles of this publish all take the cache; none of them may drift
     for _ in range(19):
@@ -250,14 +264,14 @@ class TestSmartCruiseControlMap:
   def test_new_publish_is_seen_on_the_very_next_cycle(self):
     points = [make_point(x, 0.0, 10.0 if x == 140 else WAY_V) for x in range(0, 300, 20)]
     self.run_calculations(points, v_ego=20.0)
-    assert self.scc_m.v_target == pytest.approx(v_ref(10.0, 140.0))
+    assert self.scc_m.v_target == pytest.approx(v_ref(10.0, 140.0, v_ego=20.0))
 
     # same point count, same length-ish payload, slow point moved: must not be mistaken
     # for the cached publish
     moved = [make_point(x, 0.0, 10.0 if x == 100 else WAY_V) for x in range(0, 300, 20)]
     self.mem_params.put("MapTargetVelocities", json.dumps(moved), block=True)
     self.scc_m.update_calculations()
-    assert self.scc_m.v_target == pytest.approx(v_ref(10.0, 100.0))
+    assert self.scc_m.v_target == pytest.approx(v_ref(10.0, 100.0, v_ego=20.0))
     assert math.isclose(self.scc_m.target_lon, 100 * M_TO_DEG)
 
     # curve retracted: the node is still published, at the same position, but no longer slow.
@@ -273,7 +287,7 @@ class TestSmartCruiseControlMap:
     # and a publish that drops the node entirely releases the hold the same way
     self.mem_params.put("MapTargetVelocities", json.dumps(moved), block=True)
     self.scc_m.update_calculations()
-    assert self.scc_m.v_target == pytest.approx(v_ref(10.0, 100.0))
+    assert self.scc_m.v_target == pytest.approx(v_ref(10.0, 100.0, v_ego=20.0))
     gone = [make_point(x, 0.0, WAY_V) for x in range(0, 300, 20) if x != 100]
     self.mem_params.put("MapTargetVelocities", json.dumps(gone), block=True)
     self.scc_m.update_calculations()
@@ -285,7 +299,7 @@ class TestSmartCruiseControlMap:
     # position. Here the car drives well past the slow point and the target has to release.
     points = [make_point(x, 0.0, 10.0 if x == 140 else WAY_V) for x in range(0, 300, 20)]
     self.run_calculations(points, v_ego=20.0)
-    assert self.scc_m.v_target == pytest.approx(v_ref(10.0, 140.0))
+    assert self.scc_m.v_target == pytest.approx(v_ref(10.0, 140.0, v_ego=20.0))
 
     self.publish_position(position=(200.0, 0.0))
     self.scc_m.update_calculations()
@@ -296,7 +310,7 @@ class TestSmartCruiseControlMap:
     # whether the U-turn apex truncates the forward path
     points = [make_point(0.0, 0.0, WAY_V)]
     points += [make_point(-x, 2.0, 5.0) for x in (30, 80, 130)]
-    slow = pytest.approx(v_ref(5.0, 30.0), rel=1e-3)
+    slow = pytest.approx(v_ref(5.0, math.hypot(30.0, 2.0), v_ego=25.0), rel=1e-3)
 
     self.run_calculations(points, v_ego=25.0, bearing=90.0)
     assert self.scc_m.v_target == pytest.approx(WAY_V)
@@ -347,14 +361,14 @@ class TestSmartCruiseControlMap:
 
     points = [make_point(x, 0.0, 10.0 if x == 140 else WAY_V) for x in range(0, 300, 20)]
     self.run_calculations(points, v_ego=20.0)
-    assert self.scc_m.v_target == pytest.approx(v_ref(10.0, 140.0))
+    assert self.scc_m.v_target == pytest.approx(v_ref(10.0, 140.0, v_ego=20.0))
 
     self.mem_params.put("LastGPSPosition", "not json", block=True)
     with pytest.raises(json.JSONDecodeError):
       self.scc_m.update_calculations()
     self.publish_position()
     self.scc_m.update_calculations()
-    assert self.scc_m.v_target == pytest.approx(v_ref(10.0, 140.0))
+    assert self.scc_m.v_target == pytest.approx(v_ref(10.0, 140.0, v_ego=20.0))
   # End BluePilot
 
   # BluePilot: the continuous approach profile that replaced the binary braking window.
@@ -365,19 +379,22 @@ class TestSmartCruiseControlMap:
   # target and back again.
   def test_profile_shape(self):
     # (a) The profile is monotone in distance, never dips below the point's own target velocity,
-    # and reaches exactly that velocity 'offset' seconds of travel before the point.
+    # and reaches exactly that velocity 'offset' seconds of travel before the point. v_ego is
+    # part of the profile now (the drop-proportional decel), so every expectation is computed
+    # at the same v_ego the controller runs with. Points every 4 m so that d == tv * offset
+    # (8 m on Normal) lands exactly on a sample.
     tv, node_x = 10.0, 300.0
-    _, _, offset, _ = NORMAL
-    points = [make_point(x, 0.0, tv if x == node_x else WAY_V) for x in range(0, 405, 5)]
+    offset = NORMAL[3]
+    points = [make_point(x, 0.0, tv if x == node_x else WAY_V) for x in range(0, 405, 4)]
 
     seen = []
-    for x in range(200, 305, 5):  # the car sits exactly on a point, so along-path d == node_x - x
+    for x in range(200, 301, 4):  # the car sits exactly on a point, so along-path d == node_x - x
       self.run_calculations(points, v_ego=20.0, position=(float(x), 0.0))
       d = node_x - x
       seen.append((d, self.scc_m.v_target))
 
       assert self.scc_m.v_target >= tv - 1e-9, "the profile may never ask for less than the curve itself"
-      assert self.scc_m.v_target == pytest.approx(v_ref(tv, d), rel=1e-9)
+      assert self.scc_m.v_target == pytest.approx(v_ref(tv, d, v_ego=20.0), rel=1e-9)
       if d > 0:
         assert math.isclose(self.scc_m.target_lon, node_x * M_TO_DEG)
 
@@ -391,27 +408,33 @@ class TestSmartCruiseControlMap:
     assert dict(seen)[0.0] == pytest.approx(tv)
 
   def test_early_hold_without_demanding_a_brake(self):
-    # (b) With a curve ~100 m ahead and the car sitting at its set speed, the published target
+    # (b) With a curve ~50 m ahead and the car sitting at its set speed, the published target
     # is BELOW the set speed - so cruise can no longer accelerate into the bend - but still well
-    # ABOVE the curve's own target velocity, so nothing is asking for the brakes yet.
+    # ABOVE the curve's own target velocity, so nothing is asking for the brakes yet. A 3 m/s
+    # trim rides low on the drop-proportional ramp (near base_decel, the barely-braking regime
+    # the city traces show), so the profile only binds ~56 m out rather than 100+.
     tv, v_cruise = 11.0, 14.0
     points = [make_point(x, 0.0, tv if x == 200.0 else WAY_V) for x in range(0, 405, 5)]
 
-    published = self.drive(points, v_ego=v_cruise, v_cruise=v_cruise, start_x=100.0, cycles=40)
+    published = self.drive(points, v_ego=v_cruise, v_cruise=v_cruise, start_x=150.0, cycles=40)
     settled = published[10:]
 
     assert all(p != V_CRUISE_UNSET for p in settled)
     assert all(tv < p < v_cruise for p in settled), settled
-    # ~100 m out the profile is still nearer the set speed than the curve speed: a hold, not a brake
+    # ~50 m out the profile is still nearer the set speed than the curve speed: a hold, not a brake
     assert settled[0] > (tv + v_cruise) / 2
-    # and it is the profile value for where the car actually is, not the raw curve target
-    assert published[-1] == pytest.approx(v_ref(tv, 200.0 - (100.0 + v_cruise * DT_MDL * 39)), abs=0.3)
+    # and it is the profile value for where the car actually is, not the raw curve target.
+    # v_ego stays pinned at v_cruise in drive(), so the expectation uses that same v_ego.
+    assert published[-1] == pytest.approx(v_ref(tv, 200.0 - (150.0 + v_cruise * DT_MDL * 39), v_ego=v_cruise), abs=0.3)
 
   def test_published_target_never_steps(self):
     # (c) Across a whole simulated approach - engage, bind, apex, hold, release - the published
-    # value never moves faster than TARGET_SLEW_RATE, in either direction.
+    # value never steps, but the limit is ASYMMETRIC now: it may rise no faster than
+    # TARGET_SLEW_RATE, and fall no faster than the profile's max_decel (Normal here) - the
+    # ceiling a human who noticed the curve late would brake at, and no harder.
     tv, v_cruise = 10.0, 14.0
-    max_delta = TARGET_SLEW_RATE * DT_MDL
+    max_up = TARGET_SLEW_RATE * DT_MDL
+    max_down = NORMAL[2] * DT_MDL  # the default profile's max_decel governs the fall rate
     points = [make_point(x, 0.0, tv if x == 250.0 else WAY_V) for x in range(0, 605, 5)]
 
     published = self.drive(points, v_ego=v_cruise, v_cruise=v_cruise, start_x=0.0, cycles=500)
@@ -424,16 +447,18 @@ class TestSmartCruiseControlMap:
       if p == V_CRUISE_UNSET:
         # a release is only allowed once the ramp has climbed back to the set speed
         if prev is not None:
-          assert prev >= v_cruise - max_delta - 1e-9, f"released from {prev} with cruise at {v_cruise}"
+          assert prev >= v_cruise - max_up - 1e-9, f"released from {prev} with cruise at {v_cruise}"
         prev = None
         continue
       if prev is None:
         # the first published value may not itself be a step below whatever already governs
         # the car (the set speed here, since v_ego is held at it for the whole approach)
-        assert p >= v_cruise - max_delta - 1e-9, f"engaged with a step to {p} from cruise at {v_cruise}"
+        assert p >= v_cruise - max_down - 1e-9, f"engaged with a step to {p} from cruise at {v_cruise}"
         entered = True
+      elif p > prev:
+        assert p - prev <= max_up + 1e-9, f"upward step of {p - prev:.4f} m/s exceeds {max_up:.4f}"
       else:
-        assert abs(p - prev) <= max_delta + 1e-9, f"step of {abs(p - prev):.4f} m/s exceeds {max_delta:.4f}"
+        assert prev - p <= max_down + 1e-9, f"downward step of {prev - p:.4f} m/s exceeds {max_down:.4f}"
       prev = p
 
     assert entered
@@ -466,7 +491,7 @@ class TestSmartCruiseControlMap:
     # (e) A curve beyond max(HORIZON_MIN_M, v_ego * horizon) does not bind at all; the same
     # curve binds once the horizon reaches it.
     tv, node_x = 10.0, 200.0
-    _, _, _, horizon_s = NORMAL
+    horizon_s = NORMAL[4]
     points = [make_point(x, 0.0, tv if x == node_x else WAY_V) for x in range(0, 405, 20)]
 
     slow_v_ego = 14.0
@@ -477,7 +502,7 @@ class TestSmartCruiseControlMap:
     fast_v_ego = 25.0
     assert max(HORIZON_MIN_M, fast_v_ego * horizon_s) > node_x
     self.run_calculations(points, v_ego=fast_v_ego)
-    assert self.scc_m.v_target == pytest.approx(v_ref(tv, node_x))
+    assert self.scc_m.v_target == pytest.approx(v_ref(tv, node_x, v_ego=fast_v_ego))
 
   def test_inactive_publishes_v_cruise_unset(self):
     # P4: arbitration stays a plain min() in the planner - when the profile is above the set
@@ -491,20 +516,25 @@ class TestSmartCruiseControlMap:
 
   # BluePilot: curve speed presets
   def test_preset_table(self):
-    # the contract's single source of truth: (lat_accel, approach_decel, offset, horizon)
+    # the contract's single source of truth: (lat_accel, base_decel, max_decel, offset, horizon).
+    # The numbers are fitted to verified OSM human-driving bands - the three lat anchors ARE the
+    # city p25/median/p75 lateral acceleration on the route-verified Nashville traces - and
+    # cross-checked against the AASHTO/FHWA literature (side-friction comfort curve, Fitzpatrick
+    # decel rates, SHRP2 ramp studies). See the table's comment in map_controller.py.
     assert CURVE_SPEED_PRESETS == (
-      (1.3, 0.30, 2.0, 12.0),
-      (1.6, 0.40, 1.5, 10.0),
-      (2.0, 0.60, 1.0, 8.0),
+      (1.7, 0.30, 1.2, 1.5, 12.0),
+      (2.0, 0.45, 1.8, 0.8, 10.0),
+      (2.4, 0.60, 2.5, 0.3, 8.0),
     )
     assert DEFAULT_CURVE_SPEED_PROFILE == 1
 
   @pytest.mark.parametrize("index", [0, 1, 2])
   def test_apply_profile_drives_the_controller_constants(self, index):
     self.scc_m._apply_profile(index)
-    _, approach_decel, offset, horizon = CURVE_SPEED_PRESETS[index]
+    _, approach_decel, max_decel, offset, horizon = CURVE_SPEED_PRESETS[index]
     assert self.scc_m.profile_index == index
     assert self.scc_m.approach_decel == approach_decel
+    assert self.scc_m.max_decel == max_decel
     assert self.scc_m.target_offset == offset
     assert self.scc_m.horizon == horizon
 
@@ -515,20 +545,26 @@ class TestSmartCruiseControlMap:
   @pytest.mark.parametrize("index", [0, 1, 2])
   def test_ramp_start_is_a_smooth_multi_second_approach(self, index):
     # the owner's acceptance criterion: the max speed starts coming down several seconds before
-    # the curve as a smooth ramp, ~8 s on the default preset for a typical city bend
-    _, approach_decel, offset, _ = CURVE_SPEED_PRESETS[index]
+    # the curve as a smooth ramp. A 2.5 m/s city trim rides low on the quadratic
+    # drop-proportional ramp, matching the traces (city curves shave 1-3 mph at 0.2-0.5 m/s^2,
+    # barely braking events) - ~5.7 s on the default preset, up to ~9 s of mostly-hold on
+    # Comfort (the owner's stated tolerance was an 8 s ramp-down), ~4 s on Sport. The
+    # constant-a model here actually understates the real ramp, since the decel relaxes
+    # further as the car slows.
+    preset = CURVE_SPEED_PRESETS[index]
+    offset = preset[3]
     v_cruise, tv = 14.0, 11.5
 
-    d_bind = bind_distance(v_cruise, tv, CURVE_SPEED_PRESETS[index])
-    assert v_ref(tv, d_bind, CURVE_SPEED_PRESETS[index]) == pytest.approx(v_cruise)
+    d_bind = bind_distance(v_cruise, tv, preset, v_ego=v_cruise)
+    assert v_ref(tv, d_bind, preset, v_ego=v_cruise) == pytest.approx(v_cruise)
 
-    # the ramp is a constant-decel leg followed by the offset held at tv
-    ramp_seconds = (v_cruise - tv) / approach_decel + offset
-    assert 5.0 <= ramp_seconds <= 11.0
+    # the ramp is a constant-decel leg (at the drop-proportional a_eff) followed by the offset held at tv
+    ramp_seconds = (v_cruise - tv) / a_eff(tv, v_cruise, preset) + offset
+    assert 2.5 <= ramp_seconds <= 9.5
 
     if index == DEFAULT_CURVE_SPEED_PROFILE:
-      assert d_bind == pytest.approx(96.94, abs=0.5)
-      assert ramp_seconds == pytest.approx(7.75, abs=0.05)
+      assert d_bind == pytest.approx(71.83, abs=0.5)
+      assert ramp_seconds == pytest.approx(5.71, abs=0.05)
 
   def test_lat_accel_param_is_written_as_a_bare_decimal(self, tmp_path):
     # mapd json.Unmarshal()s this param straight into a float64, so whatever Params.put()
@@ -539,7 +575,7 @@ class TestSmartCruiseControlMap:
     scratch = Params(str(tmp_path))
     key = "FordLowSpeedFactor_ang"  # PERSISTENT | FLOAT, unrelated to anything under test
 
-    for value in (1.3, 1.6, 2.0):
+    for value in (1.7, 2.0, 2.4):
       scratch.put(key, value, block=True)
       assert scratch.get(key) == pytest.approx(value)
       stored = pathlib.Path(scratch.get_param_path(key)).read_text()
@@ -551,7 +587,7 @@ class TestSmartCruiseControlMap:
     except UnknownKeyName:
       # not registered in this build: the controller must stay inert instead of raising
       self.scc_m._lat_accel_param_supported = True
-      self.scc_m._write_map_target_lat_a(1.3)
+      self.scc_m._write_map_target_lat_a(1.7)
       assert not self.scc_m._lat_accel_param_supported
       pytest.skip(f"{MAP_TARGET_LAT_A_PARAM} not registered in this build")
 

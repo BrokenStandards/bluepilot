@@ -36,9 +36,9 @@ ICMB_UNAVAILABLE = tr_noop("Intelligent Cruise Button Management is currently un
 CURVE_SPEED_PROFILE_BUTTONS = [tr("Comfort"), tr("Normal"), tr("Sport")]
 
 CURVE_SPEED_PROFILE_DESCRIPTIONS = [
-  tr("Comfort: Slows earliest and most gently for mapped curves."),
-  tr("Normal: Balanced timing and firmness when slowing for mapped curves."),
-  tr("Sport: Slows latest and carries the most speed through mapped curves."),
+  tr("Comfort: Curve speeds of a relaxed human driver, slowing earliest and most gently."),
+  tr("Normal: Curve speeds and braking of the typical human driver."),
+  tr("Sport: Curve speeds of a brisk human driver, slowing latest and carrying the most speed."),
 ]
 # End BluePilot
 
