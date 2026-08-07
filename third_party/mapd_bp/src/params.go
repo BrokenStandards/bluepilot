@@ -156,6 +156,11 @@ func PutParam(path string, data []byte) error {
 	}
 	tmpName := file.Name()
 	defer os.Remove(tmpName)
+	// BluePilot: the temp file's fd was never closed either — same finalizer
+	// dependency as the directory fd below. Closing after the rename is safe;
+	// the descriptor stays valid and the data is already fsynced.
+	defer file.Close()
+	// End BluePilot
 
 	_, err = file.Write(data)
 	if err != nil {
@@ -201,6 +206,13 @@ func PutParam(path string, data []byte) error {
 	if err != nil {
 		return errors.Wrap(err, "could not open params directory")
 	}
+	// BluePilot: without this the directory fd leaks — ~10 per 1 Hz tick,
+	// ~36,000/hour — and is only ever reclaimed by os.File's finalizer, i.e.
+	// by GC pressure that mapd happened to generate from re-unmarshalling the
+	// tile every tick. Removing that garbage (see tile_cache.go) makes the
+	// leak fatal: the process hits EMFILE instead.
+	defer directory.Close()
+	// End BluePilot
 
 	err = directory.Sync()
 	if err != nil {
@@ -244,6 +256,9 @@ func RemoveParam(path string) error {
 	if err != nil {
 		return errors.Wrap(err, "could not open params directory")
 	}
+	// BluePilot: see PutParam — the directory fd was never closed.
+	defer directory.Close()
+	// End BluePilot
 
 	err = directory.Sync()
 	if err != nil {

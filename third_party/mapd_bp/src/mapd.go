@@ -7,7 +7,6 @@ import (
 	"os"
 	"time"
 
-	"capnproto.org/go/capnp/v3"
 	"github.com/pkg/errors"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
@@ -16,7 +15,7 @@ import (
 
 // Fork version. The authoritative copy consumed by the Python installer is the
 // VERSION file next to the binaries; keep both in sync.
-const VERSION = "v1.12.0-bp2"
+const VERSION = "v1.12.0-bp3"
 
 type State struct {
 	Data                   []uint8
@@ -80,27 +79,14 @@ func RoadName(way Way) string {
 	return ""
 }
 
-func readOffline(data []uint8) Offline {
-	msg, err := capnp.UnmarshalPacked(data)
-	logde(errors.Wrap(err, "could not unmarshal offline data"))
-	if err == nil {
-		// Lift the per-Message capnp read-traversal budget (default 64 MiB per
-		// Message). The budget exists to stop maliciously nested REMOTE payloads
-		// from pinning the CPU, but this tile is locally generated trusted data
-		// with bounded, non-recursive structure — the only thing the budget does
-		// here is count every re-read: each MatchingWays graph hop re-reads every
-		// way's node list (~3.6 MiB per scan on an 11k-way tile), so the
-		// speed-limit-guess walk alone exhausted 64 MiB after ~18 scans and every
-		// later read this tick (curvatures, road name, next speed limit) silently
-		// returned empty structs. MaxUint64 makes the budget effectively
-		// unlimited for the lifetime of this Message.
-		msg.ResetReadLimit(math.MaxUint64)
-		offline, err := ReadRootOffline(msg)
-		logde(errors.Wrap(err, "could not read offline message"))
-		return offline
-	}
-	return Offline{}
-}
+// BluePilot: readOffline now lives in tile_cache.go, where it memoizes the
+// unmarshalled tile for as long as state.Data is the same slice. The capnp
+// read-traversal budget is still lifted there (each MatchingWays graph hop
+// used to re-read every way's node list, ~3.6 MiB per scan on an 11k-way
+// tile, so the speed-limit-guess walk alone exhausted the 64 MiB default
+// after ~18 scans and every later read this tick silently returned empty
+// structs).
+// End BluePilot
 
 func readPosition(persistent bool) (Position, error) {
 	path := LAST_GPS_POSITION
@@ -241,6 +227,12 @@ func loop(state *State) {
 			state.CarContext = CarContext{}
 			state.DivergenceTicks = 0
 			state.SpeedLimitGuess = SpeedLimitGuess{}
+			// BluePilot: state.Data is gone, so release the memoized tile and
+			// its endpoint index with it. Not needed for correctness (both are
+			// keyed on identity) — this only stops a dead ~20 MB tile from
+			// being pinned until the next successful load.
+			InvalidateTileCaches()
+			// End BluePilot
 		}
 	}()
 
@@ -292,6 +284,7 @@ func loop(state *State) {
 	dataReloaded := false
 	if !PointInBox(pos.Latitude, pos.Longitude, offline.MinLat(), offline.MinLon(), offline.MaxLat(), offline.MaxLon()) {
 		state.Data, err = FindWaysAroundLocation(pos.Latitude, pos.Longitude)
+		state.Data = LoadedTileBytes(state.Data)
 		logde(errors.Wrap(err, "could not find ways around current location"))
 		state.CurrentWay.ConfidenceCounter = 0
 		offline = readOffline(state.Data)
@@ -364,10 +357,12 @@ func loop(state *State) {
 		err = PutParam(ROAD_NAME, []byte(RoadName(state.CurrentWay.Way)))
 		logwe(errors.Wrap(err, "could not write road name"))
 
-		data, err = json.Marshal(state.CurrentWay.Way.AdvisorySpeed())
-		logde(errors.Wrap(err, "could not marshal advisory speed limit"))
-		err = PutParam(MAP_ADVISORY_LIMIT, data)
-		logwe(errors.Wrap(err, "could not write advisory speed limit"))
+		// BluePilot: the bare-float64 AdvisorySpeed() write that used to sit
+		// here was immediately overwritten by the AdvisoryLimit object write
+		// below, so every tick had a window where MapAdvisoryLimit held a
+		// number instead of the object its readers parse. Removed (no reader
+		// of the scalar form exists in the tree).
+		// End BluePilot
 
 		hazard, err := state.CurrentWay.Way.Hazard()
 		logde(errors.Wrap(err, "could not read current way hazard"))
@@ -517,6 +512,7 @@ func main() {
 	if err == nil {
 		state.Position = pos
 		state.Data, err = FindWaysAroundLocation(pos.Latitude, pos.Longitude)
+		state.Data = LoadedTileBytes(state.Data)
 		logde(errors.Wrap(err, "could not find ways around initial location"))
 	}
 

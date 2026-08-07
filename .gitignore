@@ -101,3 +101,8 @@ bluepilot/agent_info/
 bluepilot/agent_tools/
 bluepilot/local_files/
 tools/jotpluggler/layouts/Path_Angle_Analysis.json
+
+# BluePilot: stray `go build` output inside the vendored mapd source tree
+# (the shipped binaries live one level up, in third_party/mapd_bp/)
+third_party/mapd_bp/src/mapd
+third_party/mapd_bp/src/mapd-x86_64

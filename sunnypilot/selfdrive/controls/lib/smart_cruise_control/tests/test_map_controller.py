@@ -9,6 +9,8 @@ import json
 import math
 import platform
 
+import pytest
+
 from cereal import custom
 from openpilot.common.params import Params
 from openpilot.common.realtime import DT_MDL
@@ -47,15 +49,23 @@ class TestSmartCruiseControlMap:
   # BluePilot: drive update_calculations directly from metric points; the optional bearing
   # mimics osm_map_data.update_location writing the vehicle bearing into LastGPSPosition
   def run_calculations(self, points, v_ego, position=(0.0, 0.0), bearing=None):
+    self.publish_position(position, bearing)
+    self.mem_params.put("MapTargetVelocities", json.dumps(points), block=True)
+    self.scc_m.v_ego = v_ego
+    self.scc_m.a_ego = 0.0
+    self.scc_m.update_calculations()
+
+  def publish_position(self, position=(0.0, 0.0), bearing=None):
+    """Write LastGPSPosition the way osm_map_data.update_location does, nothing else."""
     x, y = position
     gps = {"latitude": y * M_TO_DEG, "longitude": x * M_TO_DEG}
     if bearing is not None:
       gps["bearing"] = bearing
     self.mem_params.put("LastGPSPosition", json.dumps(gps), block=True)
-    self.mem_params.put("MapTargetVelocities", json.dumps(points), block=True)
-    self.scc_m.v_ego = v_ego
-    self.scc_m.a_ego = 0.0
-    self.scc_m.update_calculations()
+
+  @property
+  def target(self):
+    return self.scc_m.v_target, self.scc_m.target_lat, self.scc_m.target_lon
   # End BluePilot
 
   def test_initial_state(self):
@@ -168,4 +178,126 @@ class TestSmartCruiseControlMap:
     assert self.scc_m.v_target == 10.0
     assert math.isclose(self.scc_m.target_lon, 140 * M_TO_DEG)
     assert self.scc_m.target_lat == 0.0
+  # End BluePilot
+
+  # BluePilot: the mem params are re-read every 20 Hz cycle but mapd only republishes at 1 Hz,
+  # so the parse of MapTargetVelocities/LastGPSPosition (and the point geometry derived from
+  # it) is cached against the raw param bytes. A stale cache is a wrong braking target, so
+  # every invalidation path is pinned here.
+  def test_parse_cache_hit_matches_a_cold_controller(self):
+    points = [make_point(x, 0.0, 10.0 if x == 140 else 30.0) for x in range(0, 300, 20)]
+    self.run_calculations(points, v_ego=20.0)
+    first = self.target
+    assert first[0] == 10.0
+
+    # the other 19 cycles of this publish all take the cache; none of them may drift
+    for _ in range(19):
+      self.scc_m.update_calculations()
+    assert self.target == first
+
+    # and a controller that has never seen this payload agrees exactly, to the bit
+    cold = SmartCruiseControlMap()
+    cold.v_ego, cold.a_ego = 20.0, 0.0
+    cold.update_calculations()
+    assert (cold.v_target, cold.target_lat, cold.target_lon) == first
+
+  def test_new_publish_is_seen_on_the_very_next_cycle(self):
+    points = [make_point(x, 0.0, 10.0 if x == 140 else 30.0) for x in range(0, 300, 20)]
+    self.run_calculations(points, v_ego=20.0)
+    assert self.scc_m.v_target == 10.0
+
+    # same point count, same length-ish payload, slow point moved: must not be mistaken
+    # for the cached publish
+    moved = [make_point(x, 0.0, 10.0 if x == 100 else 30.0) for x in range(0, 300, 20)]
+    self.mem_params.put("MapTargetVelocities", json.dumps(moved), block=True)
+    self.scc_m.update_calculations()
+    assert self.scc_m.v_target == 10.0
+    assert math.isclose(self.scc_m.target_lon, 100 * M_TO_DEG)
+
+    # curve gone from the path entirely
+    cleared = [make_point(x, 0.0, 30.0) for x in range(0, 300, 20)]
+    self.mem_params.put("MapTargetVelocities", json.dumps(cleared), block=True)
+    self.scc_m.update_calculations()
+    assert self.scc_m.v_target == NO_TARGET_V
+    assert self.scc_m.target_lat == 0.0
+    assert self.scc_m.target_lon == 0.0
+
+  def test_position_dependent_work_still_runs_on_a_cache_hit(self):
+    # the car moves at 20 Hz even when the path data does not change: only the PARSE is
+    # cached, so an unchanged MapTargetVelocities must still be re-evaluated from the new
+    # position. Here the car drives past the slow point and the target has to drop.
+    points = [make_point(x, 0.0, 10.0 if x == 140 else 30.0) for x in range(0, 300, 20)]
+    self.run_calculations(points, v_ego=20.0)
+    assert self.scc_m.v_target == 10.0
+
+    self.publish_position(position=(200.0, 0.0))
+    self.scc_m.update_calculations()
+    assert self.scc_m.v_target == NO_TARGET_V
+    assert self.scc_m.target_lat == 0.0
+    assert self.scc_m.target_lon == 0.0
+
+  def test_bearing_change_alone_invalidates_the_gps_cache(self):
+    # position and path identical throughout; only the vehicle bearing moves, and it decides
+    # whether the U-turn apex truncates the forward path
+    points = [make_point(0.0, 0.0, 30.0)]
+    points += [make_point(-x, 2.0, 5.0) for x in (30, 80, 130)]
+
+    self.run_calculations(points, v_ego=25.0, bearing=90.0)
+    assert self.scc_m.v_target == NO_TARGET_V
+
+    # heading west now, along the chain: no reversal, the slow points become the target
+    self.publish_position(bearing=270.0)
+    self.scc_m.update_calculations()
+    assert self.scc_m.v_target == 5.0
+
+    # bearing dropped from the payload: back to the un-seeded walk, still a target
+    self.publish_position()
+    self.scc_m.update_calculations()
+    assert self.scc_m.v_target == 5.0
+
+    # heading east again: the very first segment reverses, target must be given up
+    self.publish_position(bearing=90.0)
+    self.scc_m.update_calculations()
+    assert self.scc_m.v_target == NO_TARGET_V
+    assert self.scc_m.target_lat == 0.0
+    assert self.scc_m.target_lon == 0.0
+
+  def test_empty_and_missing_payloads(self):
+    self.publish_position()
+    for payload in ("[]", "{}"):
+      self.mem_params.put("MapTargetVelocities", payload, block=True)
+      self.scc_m.update_calculations()
+      assert self.scc_m.target_velocities == []
+      assert self.scc_m.v_target == NO_TARGET_V
+
+    self.mem_params.remove("MapTargetVelocities")
+    self.scc_m.update_calculations()
+    assert self.scc_m.target_velocities == []
+
+    self.mem_params.remove("LastGPSPosition")
+    self.scc_m.update_calculations()
+    assert self.scc_m.last_position.latitude == 0.0
+    assert self.scc_m.last_position.longitude == 0.0
+
+  def test_malformed_payload_does_not_poison_the_cache(self):
+    self.publish_position()
+    self.mem_params.put("MapTargetVelocities", "not json", block=True)
+    with pytest.raises(json.JSONDecodeError):
+      self.scc_m.update_calculations()
+
+    # a bad payload must not install itself as the cache key, or the raise would be
+    # swallowed on every later cycle
+    with pytest.raises(json.JSONDecodeError):
+      self.scc_m.update_calculations()
+
+    points = [make_point(x, 0.0, 10.0 if x == 140 else 30.0) for x in range(0, 300, 20)]
+    self.run_calculations(points, v_ego=20.0)
+    assert self.scc_m.v_target == 10.0
+
+    self.mem_params.put("LastGPSPosition", "not json", block=True)
+    with pytest.raises(json.JSONDecodeError):
+      self.scc_m.update_calculations()
+    self.publish_position()
+    self.scc_m.update_calculations()
+    assert self.scc_m.v_target == 10.0
   # End BluePilot

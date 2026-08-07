@@ -1,6 +1,6 @@
 # mapd_bp — BluePilot fork of pfeiferj/openpilot-mapd
 
-Fork base: **pfeiferj openpilot-mapd v1.12.0**. Fork version: **`v1.12.0-bp2`**
+Fork base: **pfeiferj openpilot-mapd v1.12.0**. Fork version: **`v1.12.0-bp3`**
 (the `VERSION` file next to the binaries is the authoritative copy read by the
 Python installer; the same string is compiled into the Go binary as the
 `VERSION` constant in `src/mapd.go` and logged at startup).
@@ -21,6 +21,16 @@ third_party/mapd_bp/
 ```sh
 scripts/build_mapd.sh
 ```
+
+Some tests are empirical checks against a real generated tile and are skipped
+unless `MAPD_BP_REAL_TILE` points at one:
+
+```sh
+MAPD_BP_REAL_TILE=/path/to/36.000000_-87.000000_36.250000_-86.750000 go test ./...
+```
+
+The endpoint-index cross-check sweeps every way in that tile against the
+retained linear scan (~75 s); `-short` samples every 11th way instead (~7 s).
 
 The script runs `go test ./...` in `src/`, then builds both binaries with
 `CGO_ENABLED=0 GOOS=linux -trimpath -buildvcs=false -ldflags "-s -w"`
@@ -192,7 +202,7 @@ per-tick work, indefinitely, until the disagreement clears or a better way
 wins. That steady-state cost is bounded and was measured as acceptable on
 device, but is worth knowing about when profiling mapd CPU.
 
-### 5. Cap'n Proto read-traversal budget lifted for the tile (`src/mapd.go`)
+### 5. Cap'n Proto read-traversal budget lifted for the tile (`src/tile_cache.go`)
 
 **Defect fixed (bp2):** go-capnp gives every `Message` a read-traversal
 budget (default 64 MiB) as a defense against maliciously nested payloads:
@@ -206,7 +216,8 @@ for the rest of the tick (verification observed 14/109 ticks publishing
 EMPTY `MapTargetVelocities`, causing brake pulsing), and the guess itself
 silently zeroed.
 
-**Fix:** `readOffline` calls `msg.ResetReadLimit(math.MaxUint64)`
+**Fix:** `readOffline` (moved to `src/tile_cache.go` in bp3) calls
+`msg.ResetReadLimit(math.MaxUint64)`
 (go-capnp v3 alpha-29 API) right after a successful `UnmarshalPacked`,
 making the budget effectively unlimited for that Message. This is safe
 because the tile is generated locally by this same binary
@@ -218,7 +229,175 @@ real tile.
 
 ### 6. Version constant
 
-`VERSION = "v1.12.0-bp2"` in `src/mapd.go`, logged at startup.
+`VERSION = "v1.12.0-bp3"` in `src/mapd.go`, logged at startup.
+
+## Performance (bp3)
+
+bp3 contains **no behavioral change**. Every optimization below was accepted
+only after the full recorded scenario corpus replayed **byte-identically**
+against the pre-optimization binary (see *Equivalence proof*).
+
+### What was optimized
+
+**1. The unmarshalled tile is cached (`src/tile_cache.go`).**
+`loop()` called `readOffline(state.Data)` every tick, re-running
+`capnp.UnmarshalPacked` over the 2.97 MB packed tile — but `state.Data` is
+only replaced when the car leaves the loaded tile's bounding box (31 times in
+3030 recorded ticks, 1.0%). `readOffline` now keeps the `Offline` alongside
+the `[]uint8` it came from and reuses it while that slice is the same slice.
+The read-limit lift moved with it and is re-armed on every cache hit, so a
+long-lived Message can never exhaust the traversal budget.
+
+**2. `MatchingWays` uses an endpoint index (`src/tile_cache.go`, `src/way.go`).**
+It was a linear scan over all 11037 ways, resolving every way's node list to
+read two endpoints, and it is called once per graph hop — from `NextWay`
+(66% of calls), the speed-limit-guess walk (22%) and `uTurnInAxisPoint`
+(11%): p95 22 and up to 105 scans in a single 1 Hz tick, 70.66% of mapd's
+total CPU. A map from each way's first/last node `(lat, lon)` to way indices
+is now built once per tile load and looked up instead. It is keyed on exactly
+the `float64` pair the scan compared with `==`, admits ways under the same
+`HasNodes()`/`Len() >= 2` rules, and is built in tile order, so the candidate
+list — including its order, which several `NextWay` tiers depend on — is
+identical.
+
+**3. Both caches invalidate by identity, never by content.** The tile cache
+compares the backing array of the `[]uint8`; the index compares the
+`*capnp.Message`. Each cache holds a reference to the object it is keyed on,
+so that object cannot be collected and its address cannot be recycled — which
+makes pointer equality a sound identity test. `InvalidateTileCaches()` is also
+called from `loop()`'s panic-recovery path, where `state.Data` is discarded.
+
+**4. Two file-descriptor leaks fixed (`src/params.go`).** `PutParam` never
+closed the temp file it created nor the directory it opened to fsync, and
+`RemoveParam` never closed its directory — ~10 leaked fds per 1 Hz tick,
+reclaimed only by `os.File`'s finalizer, i.e. only by GC pressure. mapd
+happened to generate that pressure by re-unmarshalling the tile every tick;
+removing the garbage (item 1) turns the leak into a hard `EMFILE` crash. These
+are pre-existing upstream defects, unrelated to any BluePilot feature.
+
+**5. Redundant `MapAdvisoryLimit` write removed (`src/mapd.go`).** A bare
+`float64` was written and then immediately overwritten by the `AdvisoryLimit`
+object, so every tick had a window in which the param held a number instead of
+the object its readers parse. No reader of the scalar form exists in the tree.
+
+**Items 1 and 4 must ship together.** The fd leak was survivable only because
+re-unmarshalling the tile forced roughly 1.6 GCs per tick, and it is the GC
+that runs `os.File`'s finalizers. Cherry-picking the tile cache without the
+`params.go` closes takes fds from a steady ~30 to 2622 over 120 ticks, i.e. an
+`EMFILE` crash against a 1024 limit. Treat `tile_cache.go` and `params.go`
+as one change.
+
+**Tile bytes must be replaced, never rewritten in place.** Both caches key on
+identity, so bytes refilled into the existing backing array would be served
+stale. `FindWaysAroundLocation` returns a fresh `os.ReadFile` allocation, and
+`LoadedTileBytes()` is the one sanctioned way to install them — it drops the
+caches if it is ever handed the same array back, so a future buffer-reusing
+producer degrades to a re-parse instead of returning the wrong tile.
+
+### Measured, per stage
+
+Full replay corpus: 34 recorded scenarios (Regions route SB/NB, 8 surface
+forks, 16 interstate fork/ramp/gore runs, 5 speed-limit-guess corridors, 3
+divergence-rematch variants), 3584 ticks against the real 11037-way Nashville
+tile. Wall-clock figures are x86_64 (Xeon @ 2.10 GHz); **the comma 3X/4 ARM
+cores are roughly 2-4x slower per core for this pointer-chasing work**, so
+multiply accordingly. Prefer the ratios.
+
+Steady-state ticks (n=3550, i.e. everything except the tile load), ms:
+
+| stage | p50 before → after | p95 before → after | p99 before → after | max before → after |
+| --- | --- | --- | --- | --- |
+| **whole tick** | 19.39 → **0.061** | 85.74 → **0.262** | 128.85 → **0.916** | 360.99 → **1.26** |
+| `readOffline` | 5.469 → **0.0001** | 10.79 → **0.0002** | 21.28 → **0.0003** | 49.83 → **0.020** |
+| `NextWays` | 12.96 → **0.028** | 42.81 → **0.078** | 48.98 → **0.096** | 55.72 → **0.208** |
+| `GetCurrentWay` | 0.0071 → **0.0030** | 0.030 → **0.018** | 0.863 → **0.825** | 1.373 → **1.196** |
+| `ComputeSpeedLimitGuess`¹ | 65.00 → **0.083** | 146.56 → **0.230** | 287.90 → **0.386** | 315.52 → **0.447** |
+
+¹ over the ticks that actually recompute the guess (way change or reload).
+
+Allocation and GC over the same corpus:
+
+| | before | after |
+| --- | --- | --- |
+| allocation per steady-state tick | 19.80 MB | **0.0058 MB** |
+| total allocation over 3584 ticks | 70.98 GB | **0.74 GB** |
+| GC cycles | 3881 | **104** |
+| peak Go heap | 64.2 MB | **18.6 MB** |
+
+Micro-benchmarks (warm process, real tile, `-benchtime 30x -count 3`):
+
+| benchmark | before | after |
+| --- | --- | --- |
+| `readOffline`, tile unchanged | 9.34–10.19 ms, 19.80 MB, 55 allocs | **32.5–34.7 ns, 0 B, 0 allocs** |
+| `MatchingWays`, one junction | 3.29–3.35 ms, 132 B | **0.59–0.61 µs, 128 B** (≈5500x) |
+| endpoint index build | — | 5.35–5.46 ms, 1.30 MB, 16137 allocs, **once per tile load** |
+| whole tile reload (unmarshal + index) | 9.34–10.19 ms **every tick** | 14.3–15.3 ms **on 1.0% of ticks** |
+
+Live process (the shipped `mapd-x86_64` binary against the real tile with a
+0.5 s GPS feed along the Regions route; 180 s, 175 ticks, identical behavior
+in both — 61 way changes, 0 errors/warnings):
+
+| | before | after |
+| --- | --- | --- |
+| CPU consumed | 10.76 s (6.15% of a core) | **0.29 s (0.17% of a core)** |
+| open file descriptors | 27–75, sawtooth | **5, constant** |
+| RSS | 149–168 MB | **85–94 MB** |
+
+A 10-minute soak of the new binary (598 ticks) holds fds at 5 and RSS flat at
+85.1–85.3 MB after the first GC, at 0.21% of a core — no growth from
+retaining the unmarshalled tile.
+
+On ARM this moves the worst recorded tick from roughly 0.7–1.4 s (i.e. past
+the 1 s loop period, and a CPU-share neighbor of the real-time processes) to
+roughly 2.5–5 ms, and steady-state mapd CPU from ~12–25% of a core to well
+under 1%.
+
+### Equivalence proof
+
+`readOffline`-through-`GetTargetVelocities` was replayed tick by tick through
+a harness that mirrors `loop()`'s call order and state exactly, compiled once
+against the pristine bp2 tree and once against bp3, dumping the whole
+published surface per tick: matched way (bbox, name, ref, lanes, oneway, node
+count, direction, start/end), the full next-way chain, curvatures, target
+velocities, the speed-limit guess, road name, `MapSpeedLimit`,
+`NextMapSpeedLimit`, `MapAdvisoryLimit`, `NextMapAdvisoryLimit` and both
+hazards.
+
+- **38 output files, 4280 ticks, 35.4 MB of JSON — byte-identical.**
+- Four of those runs replace `state.Data` with a freshly allocated copy of the
+  tile every 7 ticks, exercising cache and index invalidation on 100 reloads;
+  also byte-identical.
+- `MatchingWays` was additionally cross-checked against the retained linear
+  scan on **22074 endpoint probes** covering every way in the real tile
+  (`TestMatchingWaysIndexMatchesLinearScanOnRealTile`).
+
+### Deliberately NOT optimized
+
+- **The guess walk's hop caps** (`GUESS_MAX_WAY_HOPS = 40`, both directions).
+  Lowering to 16 would halve the worst-case scan count, but it is the only
+  candidate that changes OUTPUT: 5.3% of currently-successful guesses (9 of
+  169 measured walks, at 25–33 hops) would be lost, and skipping the forward
+  walk would flip `source` from `both` to `backward` on ticks the UI's
+  guessed-limit outline keys on. With the endpoint index the worst measured
+  `ComputeSpeedLimitGuess` is 0.45 ms, so there is nothing left to buy.
+- **Hoisting way endpoints into the tile schema** (`offline.capnp` +
+  `generate_offline.go`). Same win as the index, but it is a tile FORMAT
+  change requiring every tile to be regenerated and redistributed plus a
+  compatibility path for tiles already on devices. Strictly dominated.
+- **A per-tick `Way.Nodes()` memo.** Was 27.5% of CPU before the index; the
+  index removes the repeated scans that caused it, so the memo would duplicate
+  state capnp already owns for no remaining benefit.
+- **`getPossibleWays`** is still a full-tile `OnWay` scan. It runs at most
+  once per tick (only when the sticky match fails) and its bbox pre-filter
+  keeps it at p99 0.83 ms / max 1.20 ms — it is now the largest single item
+  left, and still two orders of magnitude inside the 1 s budget. A spatial
+  index here would change which candidates are considered near tile edges;
+  not worth the risk for ~1 ms.
+- **The divergence rematch** (2 fires in 3030 real ticks, structurally capped
+  at 1-per-3-ticks, 0.8 ms each), **`isUTurn`'s geometry test** (1.14 µs per
+  candidate, 0.07% of CPU) and **the read-limit lift** (zero direct cost, and
+  it is what makes reads after the 18th scan correct). Measured and cleared —
+  recorded here so they are not re-litigated.
 
 ## Mem-param interfaces
 
