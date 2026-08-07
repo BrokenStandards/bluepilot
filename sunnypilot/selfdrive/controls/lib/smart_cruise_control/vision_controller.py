@@ -38,7 +38,13 @@ _ENTERING_SMOOTH_DECEL_BP = [1.3, 3.]  # absolute value of lat acc ahead
 
 # Lookup table for the acceleration for the TURNING state
 # depending on the current lateral acceleration of the vehicle.
-_TURNING_ACC_V = [0.5, 0., -0.4]  # acc value
+# BluePilot: the first breakpoint used to command +0.5 m/s^2, so anywhere below 2.3 m/s^2 of
+# lateral acceleration the TURNING state actively added speed - measured on a real curve at
+# 2.16 m/s^2 lateral it commanded +0.09 m/s^2 and the car accelerated from 11.37 to 11.89 m/s
+# through the apex. While turning this controller may hold speed or shed it, never add it, so
+# the entry breakpoint is 0.0 and the table is non-positive throughout.
+_TURNING_ACC_V = [0.0, 0., -0.4]  # acc value
+# End BluePilot
 _TURNING_ACC_BP = [1.5, 2.3, 3.]  # absolute value of current lat acc
 
 _LEAVING_ACC = 0.5  # Conformable acceleration to regain speed while leaving a turn.

@@ -15,7 +15,7 @@ import (
 
 // Fork version. The authoritative copy consumed by the Python installer is the
 // VERSION file next to the binaries; keep both in sync.
-const VERSION = "v1.12.0-bp3"
+const VERSION = "v1.12.0-bp4"
 
 type State struct {
 	Data                   []uint8

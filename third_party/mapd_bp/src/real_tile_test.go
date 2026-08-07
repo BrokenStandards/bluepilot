@@ -10,6 +10,7 @@ package main
 // "28th Avenue" continuation over the crest).
 
 import (
+	"math"
 	"os"
 	"testing"
 )
@@ -20,6 +21,12 @@ const (
 	realTileSouthStub     = 7884
 	realTileCrestStub     = 9023
 	realTileCrestRenamed  = 1254
+	// Two-way 31st Ave N south of the pre-light bend; traversed forward this
+	// is the northbound approach, traversed backward the southbound one. It
+	// starts two nodes before the pre-light bend, so the bend node gets its
+	// own published sample (output i is anchored at x_points[i+2]).
+	realTilePreLightApproach = 10182
+	realTilePreLightFromNB   = 10180
 )
 
 func loadRealTile(t *testing.T) Offline {
@@ -202,5 +209,135 @@ func TestRealTileCrestCurvatureTargets(t *testing.T) {
 	t.Logf("southbound approach minimum within 40 m of crest curve: %.2f m/s", min)
 	if min < 12.0 {
 		t.Errorf("approach minimum around the crest is %.2f m/s; artifact not suppressed", min)
+	}
+}
+
+// chainVelocities replays a chain starting at one end of the given tile way
+// and returns the published curve targets, plus a lookup by position.
+func chainVelocities(t *testing.T, offline Offline, wayIdx int, forward bool) ([]Velocity, func(lat, lon float64) float64) {
+	t.Helper()
+	ways, _ := offline.Ways()
+	way := ways.At(wayIdx)
+	nodes, err := way.Nodes()
+	if err != nil || nodes.Len() < 2 {
+		t.Fatalf("could not read way %d nodes: %v", wayIdx, err)
+	}
+	start := nodes.At(0)
+	if !forward {
+		start = nodes.At(nodes.Len() - 1)
+	}
+	current := CurrentWay{Way: way, OnWay: OnWayResult{OnWay: true, IsForward: forward}}
+	pos := Position{Latitude: start.Latitude(), Longitude: start.Longitude()}
+	nextWays, err := NextWays(pos, current, offline, forward)
+	if err != nil {
+		t.Fatalf("NextWays failed on way %d: %v", wayIdx, err)
+	}
+	curvatures, err := GetStateCurvatures(&State{CurrentWay: current, NextWays: nextWays})
+	if err != nil {
+		t.Fatalf("GetStateCurvatures failed on way %d: %v", wayIdx, err)
+	}
+	velocities := GetTargetVelocities(curvatures)
+	at := func(lat, lon float64) float64 {
+		best, bestDist := -1.0, 5.0 // meters; must land on the exact node
+		for _, v := range velocities {
+			d := DistanceToPoint(lat*TO_RADIANS, lon*TO_RADIANS, v.Latitude*TO_RADIANS, v.Longitude*TO_RADIANS)
+			if d < bestDist {
+				bestDist, best = d, v.Velocity
+			}
+		}
+		return best
+	}
+	return velocities, at
+}
+
+// G1 acceptance: the 31st Ave N pre-light bend. The raw circumcircle triple
+// centred on the bend node gives R = 66.2 m; before peak preservation the
+// 3-sample average diluted it to R = 166.0 m (18.22 m/s / 40.8 mph) for a
+// bend the driver takes at 54-67 m radius and brakes manually for in BOTH
+// directions. The published radius must now be the raw peak.
+func TestRealTilePreLightBendKeepsItsPeak(t *testing.T) {
+	offline := loadRealTile(t)
+
+	for _, tc := range []struct {
+		name    string
+		wayIdx  int
+		forward bool
+	}{
+		{"northbound", realTilePreLightApproach, true},
+		{"southbound", realTilePreLightFromNB, false},
+	} {
+		_, at := chainVelocities(t, offline, tc.wayIdx, tc.forward)
+		v := at(36.1440162, -86.8165422)
+		if v <= 0 {
+			t.Fatalf("%s: no target published at the pre-light bend", tc.name)
+		}
+		radius := v * v / TARGET_LAT_ACCEL
+		t.Logf("%s pre-light bend: %.2f m/s (R = %.1f m)", tc.name, v, radius)
+		if radius > 80 {
+			t.Errorf("%s: pre-light bend still smeared: R = %.1f m (%.2f m/s), expected near the raw 66.2 m",
+				tc.name, radius, v)
+		}
+		if radius < 55 {
+			t.Errorf("%s: pre-light bend sharper than the raw peak: R = %.1f m", tc.name, radius)
+		}
+	}
+}
+
+// G2 acceptance: the median crossover at the south merge node. The chain
+// 31st Ave N (two-way) -> 31st Ave N (oneway NB carriageway) jogs across the
+// median there; the flattened input triples still let an unflattened
+// neighbour dominate the 3-window average and published 0.013292 1/m, the
+// 12.267 m/s phantom logged 79 times on this route. Nothing on the jog may
+// publish below ~20 m/s now, and the real bends further along the same chain
+// must keep their targets.
+func TestRealTileMergeCrossoverPhantomGone(t *testing.T) {
+	offline := loadRealTile(t)
+	velocities, at := chainVelocities(t, offline, realTilePreLightApproach, true)
+
+	const crossLat, crossLon = 36.1475565, -86.8162752
+	v := at(crossLat, crossLon)
+	t.Logf("northbound merge crossover target: %.2f m/s", v)
+	if v > 0 && v < 20.0 {
+		t.Errorf("merge-crossover phantom still present: %.2f m/s at (%.7f,%.7f)", v, crossLat, crossLon)
+	}
+
+	// Nothing within the jog itself (the two short boundary-adjacent
+	// segments, both under CROSSOVER_MAX_BOUNDARY_SEGMENT) may bind either.
+	for _, p := range velocities {
+		d := DistanceToPoint(crossLat*TO_RADIANS, crossLon*TO_RADIANS, p.Latitude*TO_RADIANS, p.Longitude*TO_RADIANS)
+		if d <= CROSSOVER_MAX_BOUNDARY_SEGMENT && p.Velocity > 0 && p.Velocity < 20.0 {
+			t.Errorf("jog sample %.1f m from the crossover still publishes %.2f m/s at (%.7f,%.7f)",
+				d, p.Velocity, p.Latitude, p.Longitude)
+		}
+	}
+
+	// Real bends on the same chain keep their targets: the pre-light bend
+	// sharpens to its raw peak and the S-curve entry north of the merge is
+	// unchanged.
+	if pre := at(36.1440162, -86.8165422); pre <= 0 || pre > 13.0 {
+		t.Errorf("pre-light bend target lost on this chain: %.2f m/s", pre)
+	}
+	if s := at(36.1480295, -86.8161978); s < 14.0 || s > 16.5 {
+		t.Errorf("S-curve entry north of the merge moved: %.2f m/s (expected ~15.1)", s)
+	}
+}
+
+// The northbound bridge inner curve is the one place on the route where the
+// map radius (86.1 m) matches the driven radius, MTSC already fired and the
+// car pulled the 2.0 m/s^2 design point. Peak preservation must leave it
+// alone — if the max moves this one, it is firing where the average was
+// already right.
+func TestRealTileBridgeInnerCurveUnchanged(t *testing.T) {
+	offline := loadRealTile(t)
+	_, at := chainVelocities(t, offline, realTileNBCarriageway, true)
+
+	v := at(36.1511278, -86.8191728)
+	if v <= 0 {
+		t.Fatal("no target published at the bridge inner curve")
+	}
+	radius := v * v / TARGET_LAT_ACCEL
+	t.Logf("northbound bridge inner curve: %.2f m/s (R = %.1f m)", v, radius)
+	if math.Abs(radius-86.1) > 5.0 {
+		t.Errorf("well-modelled bridge inner curve moved: R = %.1f m (was 86.1 m)", radius)
 	}
 }

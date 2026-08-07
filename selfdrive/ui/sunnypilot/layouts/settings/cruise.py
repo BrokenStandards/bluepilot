@@ -9,7 +9,8 @@ from enum import IntEnum
 from openpilot.selfdrive.ui.sunnypilot.layouts.settings.cruise_sub_layouts.speed_limit_settings import SpeedLimitSettingsLayout
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.system.ui.lib.multilang import tr, tr_noop
-from openpilot.system.ui.sunnypilot.widgets.list_view import toggle_item_sp, option_item_sp, simple_button_item_sp
+from openpilot.system.ui.sunnypilot.widgets import get_highlighted_description
+from openpilot.system.ui.sunnypilot.widgets.list_view import toggle_item_sp, option_item_sp, simple_button_item_sp, multiple_button_item_sp
 from openpilot.system.ui.widgets import Widget
 from openpilot.system.ui.widgets.scroller_tici import Scroller
 
@@ -28,6 +29,18 @@ ICBM_ALPHA_LONG_DESC = tr_noop("With openpilot longitudinal active, ICBM keeps t
 ICBM_OFFSET_DESC = tr_noop("How far above the desired speed ICBM keeps the cluster set speed under openpilot longitudinal. " +
                            "Vehicle dependent: must clear the cruise module's near-set-speed acceleration limit.")
 ICMB_UNAVAILABLE = tr_noop("Intelligent Cruise Button Management is currently unavailable on this platform.")
+
+# BluePilot: curve speed presets for Smart Cruise Control - Map. The Python controller owns the
+# preset table (lateral acceleration, approach deceleration, offset, horizon); the UI only stores
+# the selected index in CurveSpeedProfile.
+CURVE_SPEED_PROFILE_BUTTONS = [tr("Comfort"), tr("Normal"), tr("Sport")]
+
+CURVE_SPEED_PROFILE_DESCRIPTIONS = [
+  tr("Comfort: Slows earliest and most gently for mapped curves."),
+  tr("Normal: Balanced timing and firmness when slowing for mapped curves."),
+  tr("Sport: Slows latest and carries the most speed through mapped curves."),
+]
+# End BluePilot
 
 ACC_ENABLED_DESCRIPTION = tr_noop("Enable custom Short & Long press increments for cruise speed increase/decrease.")
 ACC_NOLONG_DESCRIPTION = tr_noop("This feature can only be used with sunnypilot longitudinal control enabled.")
@@ -68,6 +81,15 @@ class CruiseLayout(Widget):
       title=tr("Smart Cruise Control - Map"),
       description=tr("Use map data to estimate the appropriate speed to drive through turns ahead."),
       param="SmartCruiseControlMap")
+
+    # BluePilot: how early and how gently Smart Cruise Control - Map slows for mapped curves
+    self.curve_speed_profile = multiple_button_item_sp(
+      title=lambda: tr("Curve Speed"),
+      description=self._get_curve_speed_profile_description,
+      buttons=CURVE_SPEED_PROFILE_BUTTONS,
+      param="CurveSpeedProfile",
+      button_width=300)
+    # End BluePilot
 
     # BluePilot: mapd_bp reads this at runtime (no longitudinal dependency), so the
     # toggle stays enabled regardless of has_long/has_icbm below.
@@ -122,6 +144,9 @@ class CruiseLayout(Widget):
       self.model_decel_gate_toggle,
       self.scc_v_toggle,
       self.scc_m_toggle,
+      # BluePilot: Curve Speed preset selector, adjacent to the Smart Cruise Control - Map toggle
+      self.curve_speed_profile,
+      # End BluePilot
       # BluePilot: Visual Routing Assistance toggle
       self.visual_routing_assist_toggle,
       # End BluePilot
@@ -143,11 +168,20 @@ class CruiseLayout(Widget):
     self._scroller.show_event()
     self.icbm_toggle.show_description(True)
     self.custom_acc_toggle.show_description(True)
+    # BluePilot: the preset description doubles as the legend for the three buttons
+    self.curve_speed_profile.show_description(True)
+    # End BluePilot
 
   def _set_current_panel(self, panel: PanelType):
     self._current_panel = panel
     if panel == PanelType.SLA:
       self._speed_limit_layout.show_event()
+
+  # BluePilot: highlight the active curve speed preset in the description block
+  @staticmethod
+  def _get_curve_speed_profile_description():
+    return get_highlighted_description(ui_state.params, "CurveSpeedProfile", CURVE_SPEED_PROFILE_DESCRIPTIONS)
+  # End BluePilot
 
   @staticmethod
   def _get_icbm_offset_label(value):
@@ -186,6 +220,9 @@ class CruiseLayout(Widget):
         self.model_decel_gate_toggle.action_item.set_enabled(has_long)
         self.scc_v_toggle.action_item.set_enabled(True)
         self.scc_m_toggle.action_item.set_enabled(True)
+        # BluePilot: the curve speed preset only matters while map curve control can act
+        self.curve_speed_profile.action_item.set_enabled(True)
+        # End BluePilot
       else:
         ui_state.params.remove("CustomAccIncrementsEnabled")
         ui_state.params.remove("DynamicExperimentalControl")
@@ -197,6 +234,9 @@ class CruiseLayout(Widget):
         self.model_decel_gate_toggle.action_item.set_enabled(False)
         self.scc_v_toggle.action_item.set_enabled(False)
         self.scc_m_toggle.action_item.set_enabled(False)
+        # BluePilot: keep the stored preset (it is a preference, not a feature enable), just grey it out
+        self.curve_speed_profile.action_item.set_enabled(False)
+        # End BluePilot
 
     else:
       has_icbm = has_long = False

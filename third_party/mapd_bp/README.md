@@ -1,6 +1,6 @@
 # mapd_bp — BluePilot fork of pfeiferj/openpilot-mapd
 
-Fork base: **pfeiferj openpilot-mapd v1.12.0**. Fork version: **`v1.12.0-bp3`**
+Fork base: **pfeiferj openpilot-mapd v1.12.0**. Fork version: **`v1.12.0-bp4`**
 (the `VERSION` file next to the binaries is the authoritative copy read by the
 Python installer; the same string is compiled into the Go binary as the
 `VERSION` constant in `src/mapd.go` and logged at startup).
@@ -117,6 +117,63 @@ curve. Verified on the tile southbound chain (28th Avenue → SB carriageway):
 crossover-node target 9.59 → 12.99 m/s, crest-curve target unchanged at
 14.18 m/s.
 
+**bp4 refinement — peak-preserving curvature (`GetStateCurvatures`):** the
+3-sample arc-length-weighted average in `GetAverageCurvatures` SMEARS
+curvature peaks. At the 31st Ave N pre-light bend (36.1440162,-86.8165422) the
+raw circumcircle triple centred on the bend gives R = 66.2 m, but the two
+neighbouring triples (R = 318.1 m and R = 2543.8 m) carry comparable arc
+weights (76.7 / 69.3 / 68.6 m) and dilute the published value to R = 166.0 m —
+an 18.22 m/s (40.8 mph) target for a bend the driver takes at 54-67 m radius
+and 2.3 m/s^2 lateral, braking manually in BOTH directions. The published
+value is now the elementwise maximum of the averaged curvature and the RAW
+curvature of the triple centred on the SAME node (`out[i] =
+max(average_curvatures[i], curvatures[i+1])`, i.e. `R_out = min(R_avg,
+R_raw_center)`), so the average can only soften the approach, never erase the
+peak. It runs AFTER the merge/split and crossover writes into `curvatures[]`,
+so deliberately flattened samples can never be resurrected.
+
+The raw term is deliberately narrow, because a polyline is a coarse sampling
+of a smooth road and an ungated max turns every sampling artifact into a
+slowdown. Measured over the whole tile, an ungated max lowered 46.8% of all
+anchors and cost a median 12.5 mph on ordinary curves and 17.5 mph on
+interstates. Three gates confine it to the case it exists for
+(`MIN_PEAK_ARC`, `MIN_PEAK_SAGITTA`, `MIN_PEAK_CURVATURE`):
+
+- **arc >= 25 m** and **sagitta = arc²/8R >= 1.5 m.** A circumcircle only
+  resolves a radius if the deviation it implies clears OSM's digitisation
+  error. A straight stretch of Hillsboro Pike carries a 3.4 m node pair
+  implying R = 39.7 m (0.15 m of sagitta) and turned a 45 mph road into an
+  18 mph target; interstate corridors digitised at ~12 m spacing imply 0.24 m
+  of sagitta at R = 300 m, i.e. pure noise.
+- **R <= 120 m.** On gentle geometry the road's total turn lands unevenly on
+  the nodes, and whichever node caught the largest share reads as a corner: on
+  I 40 a corridor that runs at 569-851 m over a proper baseline turns 11.2° at
+  one node, and the triple there honestly measures R = 227 m. Averaging is the
+  right answer there. Below 120 m the sampling argument no longer holds — a
+  bend that tight is a real feature, and it is exactly what the average smears
+  into its straighter neighbours.
+
+With the gates the same tile-wide sweep leaves ordinary curves and interstates
+statistically indistinguishable from running the peak term off entirely
+(median give-back 3.6 / 1.8 mph at Normal, matching the controller-only
+reference), while the pre-light bend keeps its R = 66.2 m and the S-curve
+bends keep theirs.
+
+**bp4 refinement — post-average boundary suppression:** flattening the INPUT
+triples at a crossover is not enough. The 3-window average anchored on the jog
+still mixes an unflattened neighbour, and because the jog's own arc lengths
+are tiny (~13 m) that neighbour dominates the weighting: northbound at the
+south merge node (36.1475565,-86.8162752) two flattened samples plus one
+0.018837 1/m neighbour published 0.013292 1/m — the 12.267 m/s phantom that
+made up 79 of the 118 usable map targets on the whole route. The OUTPUT
+samples anchored on the jog nodes themselves (`b-1`, `b`, `b+1`, i.e. output
+indices `b-3 .. b-1`, since output `i` is anchored at `x_points[i+2]`) are now
+capped at `FLATTENED_CURVATURE` after the max. The output anchored at `b+2` is
+untouched: that is where the real curve the crossover sits on becomes visible.
+Northbound merge-crossover target 12.27 -> 36.51 m/s; southbound crest curve
+unchanged at 14.18 m/s; the well-modelled NB bridge inner curve unchanged at
+13.13 m/s (R = 86.1 m).
+
 ### 3. Speed-limit gap guess (`src/speed_limit_guess.go`)
 
 **Defect fixed:** untagged maxspeed stretches (Charlotte Ave east of 22nd Ave
@@ -229,7 +286,7 @@ real tile.
 
 ### 6. Version constant
 
-`VERSION = "v1.12.0-bp3"` in `src/mapd.go`, logged at startup.
+`VERSION = "v1.12.0-bp4"` in `src/mapd.go`, logged at startup.
 
 ## Performance (bp3)
 

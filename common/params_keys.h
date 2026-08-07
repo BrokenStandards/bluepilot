@@ -277,6 +277,12 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"MapTargetVelocities", {CLEAR_ON_ONROAD_TRANSITION, STRING}},
     {"SmartCruiseControlMap", {PERSISTENT | BACKUP, BOOL, "0"}},
     {"SmartCruiseControlVision", {PERSISTENT | BACKUP, BOOL, "0"}},
+    // BluePilot: curve speed profile preset (0=Comfort, 1=Normal, 2=Sport) selecting how early and
+    // how gently the map curve controller slows; the controller derives MapTargetLatA (read by mapd
+    // at startup and from /dev/shm every tick) from the selected preset.
+    {"CurveSpeedProfile", {PERSISTENT | BACKUP, INT, "1"}},
+    {"MapTargetLatA", {PERSISTENT | BACKUP, JSON, "2.0"}},
+    // End BluePilot
 
     // Torque lateral control custom params
     {"CustomTorqueParams", {PERSISTENT | BACKUP , BOOL}},

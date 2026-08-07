@@ -349,6 +349,38 @@ sections:
       - type: capability
         field: has_icbm
         equals: true
+  # BluePilot: curve speed preset for map curve control; the Python controller owns the preset
+  # table, the UI only stores the selected index
+  - key: CurveSpeedProfile
+    widget: multiple_button
+    title: Curve Speed
+    description: Controls how early and how gently the car slows for mapped curves. Comfort slows
+      earliest and most gently, Sport slows latest and carries the most speed through the curve.
+    options:
+    - value: 0
+      label: Comfort
+    - value: 1
+      label: Normal
+    - value: 2
+      label: Sport
+    visibility:
+    - type: any
+      conditions:
+      - type: capability
+        field: has_longitudinal_control
+        equals: true
+      - type: capability
+        field: has_icbm
+        equals: true
+    enablement:
+    - type: any
+      conditions:
+      - type: capability
+        field: has_longitudinal_control
+        equals: true
+      - type: capability
+        field: has_icbm
+        equals: true
 - id: map_matching
   # BluePilot: mapd_bp road matching; no longitudinal/ICBM dependency, so it sits
   # outside the capability-gated smart_cruise section

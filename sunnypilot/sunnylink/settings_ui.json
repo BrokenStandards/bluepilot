@@ -1153,6 +1153,60 @@
                   ]
                 }
               ]
+            },
+            {
+              "key": "CurveSpeedProfile",
+              "widget": "multiple_button",
+              "title": "Curve Speed",
+              "description": "Controls how early and how gently the car slows for mapped curves. Comfort slows earliest and most gently, Sport slows latest and carries the most speed through the curve.",
+              "options": [
+                {
+                  "value": 0,
+                  "label": "Comfort"
+                },
+                {
+                  "value": 1,
+                  "label": "Normal"
+                },
+                {
+                  "value": 2,
+                  "label": "Sport"
+                }
+              ],
+              "visibility": [
+                {
+                  "type": "any",
+                  "conditions": [
+                    {
+                      "type": "capability",
+                      "field": "has_longitudinal_control",
+                      "equals": true
+                    },
+                    {
+                      "type": "capability",
+                      "field": "has_icbm",
+                      "equals": true
+                    }
+                  ]
+                }
+              ],
+              "enablement": [
+                {
+                  "type": "any",
+                  "conditions": [
+                    {
+                      "type": "capability",
+                      "field": "has_longitudinal_control",
+                      "equals": true
+                    },
+                    {
+                      "type": "capability",
+                      "field": "has_icbm",
+                      "equals": true
+                    }
+                  ]
+                }
+              ]
             }
           ]
         },

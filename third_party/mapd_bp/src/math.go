@@ -84,6 +84,30 @@ const CROSSOVER_MAX_BOUNDARY_SEGMENT = 15.0
 // value the merge/split flattening uses.
 const FLATTENED_CURVATURE = 0.0015
 
+// Measurability gates on the raw per-triple curvature before it is allowed to
+// override the smoothed value (see GetStateCurvatures). A three-node
+// circumcircle only resolves a radius if the arc it spans is long enough to
+// carry signal and the sagitta it implies, arc^2/(8R), rises clear of OSM
+// digitisation error. Below either bound the raw sample is measuring node
+// noise: a straight arterial digitised with a 3.4 m node pair implied
+// R = 39.7 m, and interstate corridors at ~12 m spacing implied curves that
+// are not there. The smoothed value spans roughly three times the arc and
+// stays reliable at those scales, so it is what gets published instead.
+const MIN_PEAK_ARC = 25.0    // meters of arc across the triple
+const MIN_PEAK_SAGITTA = 1.5 // meters of implied deviation from a straight chord
+
+// The raw term also only rescues genuinely TIGHT bends (radius at or below
+// 1/this, i.e. 120 m). A polyline is a coarse sampling of a smooth road, so on
+// gentle geometry the total turn lands unevenly on the nodes and whichever
+// node caught the largest share reads as a local corner: on I 40 a real
+// 569-851 m corridor turned 11.2 deg at one node and the triple there honestly
+// measures R = 227 m. Averaging is the right answer for that, and for anything
+// else at highway scale. Below 120 m the sampling argument no longer applies —
+// a bend that tight is a real feature of the road, it is precisely what the
+// average smears into its straighter neighbours, and it is the only case the
+// peak term exists to rescue.
+const MIN_PEAK_CURVATURE = 1.0 / 120.0 // 1/m
+
 // boundarySegmentLength returns the length (meters) of the way's traversal
 // segment adjacent to a chain boundary: the segment the chain leaves the way
 // on (entering=false) or enters it on (entering=true), given the way's
@@ -235,8 +259,77 @@ func GetStateCurvatures(state *State) ([]Curvature, error) {
 	if err != nil {
 		return []Curvature{}, errors.Wrap(err, "could not get average curvatures from curvatures")
 	}
-	curvature_outputs := make([]Curvature, len(average_curvatures))
-	for i, curvature := range average_curvatures {
+
+	// BluePilot: peak-preserving curvature. The 3-sample arc-length-weighted
+	// average smears a curvature peak into its straight neighbours: at the 31st
+	// Ave N pre-light bend the raw circumcircle triple gives R = 66.2 m, but
+	// neighbours of R = 318.1 m and R = 2543.8 m with comparable arc weights
+	// (76.7 / 69.3 / 68.6 m) dilute the published value to R = 166.0 m — an
+	// 18.2 m/s (40.8 mph) target for a bend driven at 54-67 m radius and
+	// 2.3 m/s^2 lateral. Publish the elementwise maximum of the averaged value
+	// and the RAW curvature of the triple centred on the SAME node, so the
+	// average can only ever soften the approach, never erase the peak
+	// (R_out = min(R_avg, R_raw_center)).
+	//
+	// Index mapping: output i is anchored at x_points[i+2]; curvatures[k] is
+	// centred on x_points[k+1], so the raw sample sharing output i's anchor is
+	// curvatures[i+1].
+	//
+	// This runs AFTER the merge/split and crossover writes into curvatures[]
+	// above, so a sample those passes deliberately flattened stays flattened —
+	// the max can never resurrect a suppressed artifact.
+	// The raw triple is only allowed to win where it can actually resolve the
+	// radius it claims. A three-node circumcircle measures curvature through
+	// the sagitta it implies, arc^2/(8R); once that drops toward OSM's own
+	// digitisation error the raw value is reading node noise, not road. On a
+	// straight stretch of Hillsboro Pike a 3.4 m node pair implied R = 39.7 m
+	// (0.15 m of sagitta) and turned a 45 mph road into an 18 mph target,
+	// and interstate corridors digitised at ~12 m spacing invented curves
+	// worth 15-25 mph. The averaged value spans ~3x the arc and stays
+	// trustworthy at those scales, so where the raw sample is unresolvable we
+	// simply keep the average. The bend this whole change exists for clears
+	// both gates comfortably: 67.6 m of arc and 8.6 m of sagitta.
+	published_curvatures := make([]float64, len(average_curvatures))
+	for i := range average_curvatures {
+		published_curvatures[i] = average_curvatures[i]
+
+		raw := curvatures[i+1]
+		arc := arc_lengths[i+1]
+		if raw >= MIN_PEAK_CURVATURE && arc >= MIN_PEAK_ARC && arc*arc*raw/8 >= MIN_PEAK_SAGITTA {
+			published_curvatures[i] = math.Max(published_curvatures[i], raw)
+		}
+	}
+
+	// BluePilot: post-average boundary suppression. Flattening the INPUT
+	// triples (above) is not enough: the 3-window average anchored on the jog
+	// still mixes an unflattened neighbour, and because the jog's own arc
+	// lengths are tiny (~13 m) that neighbour dominates the weighting. At the
+	// northbound median crossover (36.1475565,-86.8162752) two flattened
+	// samples plus one 0.018837 1/m neighbour published 0.013292 1/m — the
+	// 12.27 m/s phantom that made up most of the map curve "targets" on the
+	// route. Flatten the OUTPUT samples anchored on the jog nodes themselves.
+	//
+	// The jog is the pair of short boundary-adjacent segments b-1 -> b -> b+1
+	// (that is exactly what boundarySegmentLength measured to classify it), so
+	// the anchors to suppress are nodes b-1, b and b+1, i.e. output indices
+	// b-3, b-2 and b-1. The output anchored at b+2 is left alone: that is
+	// where the real curve the crossover sits on becomes visible (the 31st Ave
+	// N crest curve peaks ~14 m past the crossover node).
+	//
+	// Applied last, after the max above, so nothing can resurrect it. Written
+	// as a cap rather than an assignment so suppression can only ever raise a
+	// published target, never lower one.
+	for _, b := range crossover_nodes {
+		for i := b - 3; i <= b-1; i++ {
+			if i >= 0 && i < len(published_curvatures) && published_curvatures[i] > FLATTENED_CURVATURE {
+				published_curvatures[i] = FLATTENED_CURVATURE
+			}
+		}
+	}
+	// End BluePilot
+
+	curvature_outputs := make([]Curvature, len(published_curvatures))
+	for i, curvature := range published_curvatures {
 		curvature_outputs[i].Curvature = curvature
 		curvature_outputs[i].Latitude = x_points[i+2]
 		curvature_outputs[i].Longitude = y_points[i+2]

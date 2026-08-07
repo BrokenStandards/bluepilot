@@ -14,7 +14,12 @@ from openpilot.common.realtime import DT_MDL
 from openpilot.selfdrive.car.cruise import V_CRUISE_UNSET
 from openpilot.selfdrive.modeld.constants import ModelConstants
 from openpilot.sunnypilot.selfdrive.controls.lib.smart_cruise_control import MIN_V
-from openpilot.sunnypilot.selfdrive.controls.lib.smart_cruise_control.vision_controller import SmartCruiseControlVision, _ENTERING_PRED_LAT_ACC_TH
+from openpilot.sunnypilot.selfdrive.controls.lib.smart_cruise_control.vision_controller import (
+  SmartCruiseControlVision,
+  _ENTERING_PRED_LAT_ACC_TH,
+  _TURNING_ACC_BP,
+  _TURNING_ACC_V,
+)
 
 VisionState = custom.LongitudinalPlanSP.SmartCruiseControl.VisionState
 
@@ -210,5 +215,22 @@ class TestSmartCruiseControlVision:
       assert float(np.max(pred_lat_accels)) >= th
       assert self.scc_v.max_pred_lat_acc < th
       assert self.scc_v.state == VisionState.enabled
+
+  # BluePilot: the TURNING branch may hold speed or shed it, never add it. The old table's first
+  # breakpoint was +0.5 m/s^2, so anywhere below 2.3 m/s^2 of lateral acceleration the controller
+  # commanded a positive acceleration and the car sped up through the apex.
+  @pytest.mark.parametrize("current_lat_acc", [1.5, 1.6, 1.9, 2.0, 2.16, 2.29, 2.3, 2.5, 3.0, 4.0, 8.0])
+  def test_turning_never_commands_positive_acceleration(self, current_lat_acc):
+    self.scc_v.state = VisionState.turning
+    self.scc_v.current_lat_acc = current_lat_acc
+    a_target = self.scc_v._update_solution()
+    assert a_target <= 0.0, f"turning at {current_lat_acc} m/s^2 lateral commanded {a_target} m/s^2"
+
+  def test_turning_table_is_non_positive_throughout(self):
+    assert _TURNING_ACC_BP[0] == 1.5
+    assert all(v <= 0.0 for v in _TURNING_ACC_V)
+    # np.interp clamps below the first breakpoint, so the whole >= 1.5 domain is covered by the table
+    assert float(np.interp(0.0, _TURNING_ACC_BP, _TURNING_ACC_V)) <= 0.0
+  # End BluePilot
 
   # TODO-SP: mock modelV2 data to test other states
