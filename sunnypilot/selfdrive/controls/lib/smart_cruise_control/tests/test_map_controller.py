@@ -29,7 +29,6 @@ from openpilot.sunnypilot.selfdrive.controls.lib.smart_cruise_control.map_contro
   TARGET_SLEW_RATE,
   TO_DEGREES,
   SmartCruiseControlMap,
-  put_json_scalar,
 )
 # End BluePilot
 
@@ -531,28 +530,20 @@ class TestSmartCruiseControlMap:
       assert d_bind == pytest.approx(96.94, abs=0.5)
       assert ramp_seconds == pytest.approx(7.75, abs=0.05)
 
-  def test_put_json_scalar_writes_a_bare_json_number(self, tmp_path):
-    # Params.put() only serialises dict/list into a JSON param, but mapd unmarshals
-    # MapTargetLatA into a bare float64. Any JSON-typed key exercises the same path; a scratch
-    # param directory keeps this off the real store.
+  def test_lat_accel_param_is_written_as_a_bare_decimal(self, tmp_path):
+    # mapd json.Unmarshal()s this param straight into a float64, so whatever Params.put()
+    # stores has to be a bare number - which is what a FLOAT-typed key gives us. (It was
+    # briefly declared JSON, whose only put() serialisers are dict and list; that made
+    # manager's default seeding raise TypeError on every boot. See
+    # common/tests/test_params_keys_defaults.py, which guards the whole key table.)
     scratch = Params(str(tmp_path))
-    key = "ApiCache_FirehoseStats"  # PERSISTENT | JSON, unrelated to anything under test
-
-    with pytest.raises(TypeError):
-      scratch.put(key, 1.3)  # the reason put_json_scalar exists
+    key = "FordLowSpeedFactor_ang"  # PERSISTENT | FLOAT, unrelated to anything under test
 
     for value in (1.3, 1.6, 2.0):
-      put_json_scalar(scratch, key, value)
+      scratch.put(key, value, block=True)
       assert scratch.get(key) == pytest.approx(value)
-      # a bare number, byte for byte - not a list and not a quoted string
-      param_file = pathlib.Path(scratch.get_param_path(key))
-      assert param_file.read_text() == json.dumps(value)
-
-    # no temp files left behind to be picked up as params
-    assert [f.name for f in param_file.parent.iterdir()] == [key]
-
-    with pytest.raises(UnknownKeyName):
-      put_json_scalar(scratch, "NoSuchParamKeyForCurveSpeed", 1.0)
+      stored = pathlib.Path(scratch.get_param_path(key)).read_text()
+      assert json.loads(stored) == pytest.approx(value), "mapd parses this with json.Unmarshal"
 
   def test_map_target_lat_a_is_handed_to_mapd(self):
     try:

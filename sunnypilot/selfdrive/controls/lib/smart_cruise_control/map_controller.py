@@ -1,8 +1,6 @@
 import json
 import math
-import os
 import platform
-import tempfile
 import threading
 
 from cereal import custom
@@ -192,35 +190,6 @@ class MapPath:
 _UNREAD = object()  # sentinel: no param value has been observed yet
 
 
-def put_json_scalar(params: Params, key: str, value: float) -> None:
-  """Write a bare JSON number into a JSON-typed param.
-
-  Params.put() only knows how to serialise dict/list into a JSON param, but mapd unmarshals
-  MapTargetLatA straight into a float64, so the payload has to be a JSON number and nothing
-  else. Write the bytes with the same create-temp / fsync / atomic-rename sequence
-  Params::put uses, in the param directory itself, so a mapd read that races the write sees
-  either the whole old value or the whole new one - never a truncated file.
-
-  Raises UnknownKeyName when the key is not registered in this build.
-  """
-  params.check_key(key)  # raises UnknownKeyName, exactly as Params.put would
-  path = params.get_param_path(key)
-  # the params ROOT, not the value directory: Params::put does the same, precisely so an
-  # interrupted write leaves the temp file somewhere read_files_in_dir() never looks
-  fd, tmp_path = tempfile.mkstemp(prefix=".tmp_value_", dir=os.path.dirname(os.path.dirname(path)))
-  try:
-    with os.fdopen(fd, "w") as f:
-      f.write(json.dumps(float(value)))
-      f.flush()
-      os.fsync(f.fileno())
-    os.replace(tmp_path, path)
-  except BaseException:
-    try:
-      os.unlink(tmp_path)
-    except OSError:
-      pass
-    raise
-# End BluePilot
 
 
 class SmartCruiseControlMap:
@@ -318,7 +287,7 @@ class SmartCruiseControlMap:
       # microseconds. The persistent copy is an fsync'd write to flash, which has no business
       # blocking a 20 Hz control thread just because the driver touched a setting while
       # moving, so it goes to a daemon thread.
-      put_json_scalar(self.mem_params, MAP_TARGET_LAT_A_PARAM, lat_accel)
+      self.mem_params.put(MAP_TARGET_LAT_A_PARAM, lat_accel)
       if self.params.get(MAP_TARGET_LAT_A_PARAM, return_default=True) != lat_accel:
         threading.Thread(target=self._write_persistent_lat_a, args=(lat_accel,), daemon=True).start()
     except UnknownKeyName:
@@ -328,7 +297,7 @@ class SmartCruiseControlMap:
       cloudlog.exception(f"map_controller: could not write {MAP_TARGET_LAT_A_PARAM}")
   def _write_persistent_lat_a(self, lat_accel: float) -> None:
     try:
-      put_json_scalar(self.params, MAP_TARGET_LAT_A_PARAM, lat_accel)
+      self.params.put(MAP_TARGET_LAT_A_PARAM, lat_accel, block=True)
     except (UnknownKeyName, OSError):
       cloudlog.exception(f"map_controller: could not persist {MAP_TARGET_LAT_A_PARAM}")
   # End BluePilot

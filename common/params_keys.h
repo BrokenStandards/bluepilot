@@ -281,7 +281,11 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     // how gently the map curve controller slows; the controller derives MapTargetLatA (read by mapd
     // at startup and from /dev/shm every tick) from the selected preset.
     {"CurveSpeedProfile", {PERSISTENT | BACKUP, INT, "1"}},
-    {"MapTargetLatA", {PERSISTENT | BACKUP, JSON, "2.0"}},
+    // FLOAT, not JSON: a JSON-typed key with a scalar default cannot round-trip through
+    // manager's default seeding (get_default_value json.loads()es it to a float, and put()
+    // has no (float, JSON) serialiser), and FLOAT already stores the bare decimal that mapd
+    // json.Unmarshal()s into a float64.
+    {"MapTargetLatA", {PERSISTENT | BACKUP, FLOAT, "2.0"}},
     // End BluePilot
 
     // Torque lateral control custom params
