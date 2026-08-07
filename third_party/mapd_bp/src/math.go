@@ -2,6 +2,7 @@ package main
 
 import (
 	"math"
+	"sort"
 
 	"capnproto.org/go/capnp/v3"
 	"github.com/pkg/errors"
@@ -71,6 +72,10 @@ type Curvature struct {
 	Latitude  float64 `json:"latitude"`
 	Longitude float64 `json:"longitude"`
 	Curvature float64 `json:"curvature"`
+	// BluePilot: the point sits on an interchange connector (see latBudget);
+	// internal context only, never serialized
+	IsRamp bool `json:"-"`
+	// End BluePilot
 }
 
 // Median-crossover signature: a way boundary that switches between two-way and
@@ -108,6 +113,191 @@ const MIN_PEAK_SAGITTA = 1.5 // meters of implied deviation from a straight chor
 // peak term exists to rescue.
 const MIN_PEAK_CURVATURE = 1.0 / 120.0 // 1/m
 
+// BluePilot: human-referenced lateral budgets.
+//
+// TARGET_LAT_ACCEL is no longer a flat budget: it is the budget AT THE 30 MPH
+// ANCHOR (13.4 m/s), and the budget at other speeds follows the AASHTO Green
+// Book side-friction comfort curve, normalised to that anchor. Verified OSM
+// trace bands over Nashville put the median human on a 30 mph arterial curve
+// at 2.0 m/s^2 measured against the MAP radius (p25 1.7, p75 2.3) - exactly
+// the AASHTO fmax value at 30 mph (0.20 g). Below the anchor the shape
+// follows AASHTO up toward 0.32 g. ABOVE the anchor the measured drivers are
+// far bolder than AASHTO's design values: on a 62-pass interstate sweeper
+// they hold 72 mph at 0.6-0.8 m/s^2 without lifting, on an R~490 m curve
+// they hold 63 mph at 1.64 m/s^2, and they only start braking around
+// 2.1 m/s^2 (65 -> 55 mph on an R~285 m curve) - where AASHTO's 0.12 g would
+// have them lift a full 10 mph earlier. So the high-speed tail flattens at
+// 0.16 g (0.8 x anchor) instead of falling to 0.08: gentle sweepers stay
+// unbound exactly as humans leave them, and genuinely tight high-speed
+// curves still bind near the measured human speed. Interpolated linearly,
+// clamped at the table ends.
+//
+// Ramps are their own regime, not a point on that curve: on the verified
+// I-65 -> Old Hickory loop (map R 69 m) the median human runs 3.4 m/s^2, and
+// on the I-440 exit ramp 3.1-3.9 m/s^2 at 55 mph - drivers accept roughly
+// 0.25-0.3 g on connectors they chose to take (SHRP2 ramp studies agree),
+// nearly twice their open-road budget at the same speed. A way is a ramp when
+// it is oneway with neither name nor ref, the interchange-connector signature
+// in this tile schema (both verified ramps match it; named city one-ways do
+// not). The ramp budget is flat across speed (measured flat from the 34 mph
+// loop to the 55 mph diagonal exit), scaled by the profile anchor and capped
+// at RAMP_LAT_CAP - just above ISO 11270's 3.0 m/s^2 assisted-steering bound
+// and below the 3.9 m/s^2 hard ceiling naturalistic studies see anywhere.
+var COMFORT_SPEED_MS = []float64{6.7, 8.9, 11.2, 13.4, 15.6, 17.9, 20.1, 24.6, 29.1, 35.8}
+var COMFORT_FMAX_G = []float64{0.32, 0.27, 0.23, 0.20, 0.19, 0.18, 0.17, 0.165, 0.16, 0.16}
+
+const COMFORT_ANCHOR_G = 0.20 // fmax at the 30 mph anchor; the shape divides by this
+const RAMP_LAT_MULT = 1.55    // ramp budget = anchor budget x this ...
+const RAMP_LAT_CAP = 3.4      // ... capped here (m/s^2)
+
+// comfortShape returns fmax(v)/fmax(30 mph): 1.0 at the anchor, ~1.6 at
+// parking-lot speed, flat at 0.8 from ~65 mph up.
+func comfortShape(v float64) float64 {
+	t := COMFORT_SPEED_MS
+	if v <= t[0] {
+		return COMFORT_FMAX_G[0] / COMFORT_ANCHOR_G
+	}
+	if v >= t[len(t)-1] {
+		return COMFORT_FMAX_G[len(t)-1] / COMFORT_ANCHOR_G
+	}
+	for i := 1; i < len(t); i++ {
+		if v <= t[i] {
+			f := (v - t[i-1]) / (t[i] - t[i-1])
+			g := COMFORT_FMAX_G[i-1] + f*(COMFORT_FMAX_G[i]-COMFORT_FMAX_G[i-1])
+			return g / COMFORT_ANCHOR_G
+		}
+	}
+	return COMFORT_FMAX_G[len(t)-1] / COMFORT_ANCHOR_G
+}
+
+// latBudget is the lateral acceleration allowed at speed v on this kind of
+// way. TARGET_LAT_ACCEL is the profile's 30 mph anchor (MapTargetLatA).
+func latBudget(v float64, isRamp bool) float64 {
+	if isRamp {
+		return math.Min(TARGET_LAT_ACCEL*RAMP_LAT_MULT, RAMP_LAT_CAP)
+	}
+	return TARGET_LAT_ACCEL * comfortShape(v)
+}
+
+// BluePilot: loop ramps are DESIGNED as circular arcs, and their whole-way
+// geometry says so more reliably than any local estimate: total sweep over
+// total length gives R 74 m on the verified I-65 -> Old Hickory loop (driven
+// 62-68 m, tile noded so coarsely its raw triples claim 42) and R 56 m on the
+// Briley loop (whose 6-9 m node legs make raw triples claim 23). For a ramp
+// way that sweeps most of a circle, published curvature on its points is
+// clamped into a band around that mean: capped so digitising noise cannot
+// fake a much tighter coil, and floored - only where the local estimate
+// already shows real curvature, so a straight lead-in stays straight - so
+// under-reading cannot let the car carry mainline speed into the coil.
+const LOOP_MIN_SWEEP_DEG = 170.0 // a ramp turning at least this much is a loop
+const LOOP_CURV_CAP = 1.25       // x mean sweep curvature
+const LOOP_CURV_FLOOR = 0.85     // x mean sweep curvature ...
+const LOOP_FLOOR_GATE = 0.5      // ... applied only where local curv is already this fraction of mean
+
+// loopMeanCurvature returns the coil's sweep/length curvature when the way is
+// a loop ramp, else 0. The mean is taken over the way's curved CORE: loop
+// ways often carry a straight lead-in/out (the verified Old Hickory loop
+// spends its first 66 m and last ~60 m nearly straight), and including those
+// dilutes the mean from the ~70 m the coil actually is to over 100 m. Ends
+// are trimmed while their local turn rate is under half the whole-way mean.
+func loopMeanCurvature(way Way) float64 {
+	if !isRampWay(way) {
+		return 0
+	}
+	nodes, err := way.Nodes()
+	if err != nil || nodes.Len() < 4 {
+		return 0
+	}
+	n := nodes.Len()
+	segLen := make([]float64, n) // segLen[i]: length of segment i-1 -> i
+	turn := make([]float64, n)   // turn[i]: |heading change| at interior node i
+	prevBearing := 0.0
+	length := 0.0
+	sweep := 0.0
+	for i := 1; i < n; i++ {
+		a, b := nodes.At(i-1), nodes.At(i)
+		segLen[i] = DistanceToPoint(a.Latitude()*TO_RADIANS, a.Longitude()*TO_RADIANS,
+			b.Latitude()*TO_RADIANS, b.Longitude()*TO_RADIANS)
+		length += segLen[i]
+		bearing := Bearing(a.Latitude(), a.Longitude(), b.Latitude(), b.Longitude())
+		if i > 1 {
+			d := bearing - prevBearing
+			for d > math.Pi {
+				d -= 2 * math.Pi
+			}
+			for d < -math.Pi {
+				d += 2 * math.Pi
+			}
+			turn[i-1] = math.Abs(d)
+			sweep += turn[i-1]
+		}
+		prevBearing = bearing
+	}
+	if length <= 0 || sweep < LOOP_MIN_SWEEP_DEG*TO_RADIANS {
+		return 0
+	}
+	wayMean := sweep / length
+
+	// trim straight ends: drop interior nodes whose local curvature (turn over
+	// the node-centred arc) is under half the whole-way mean
+	lo, hi := 1, n-2 // interior node range
+	localCurv := func(j int) float64 {
+		arc := (segLen[j] + segLen[j+1]) / 2
+		if arc <= 0 {
+			return 0
+		}
+		return turn[j] / arc
+	}
+	for lo < hi && localCurv(lo) < 0.5*wayMean {
+		lo++
+	}
+	for hi > lo && localCurv(hi) < 0.5*wayMean {
+		hi--
+	}
+	coreSweep := 0.0
+	coreLen := 0.0
+	for j := lo; j <= hi; j++ {
+		coreSweep += turn[j]
+		coreLen += (segLen[j] + segLen[j+1]) / 2
+	}
+	if coreLen <= 0 || coreSweep <= 0 {
+		return wayMean
+	}
+	return coreSweep / coreLen
+}
+
+// isRampWay: interchange-connector signature (see the budget comment above).
+func isRampWay(way Way) bool {
+	if !way.OneWay() {
+		return false
+	}
+	if name, err := way.Name(); err != nil || name != "" {
+		return false
+	}
+	if ref, err := way.Ref(); err != nil || ref != "" {
+		return false
+	}
+	return true
+}
+
+// BluePilot: dense-noding curvature cap - what the road sustains, not what
+// one noisy triple claims.
+//
+// A three-node circumcircle reads tracing noise on densely-noded polylines:
+// the verified Old Hickory loop is a steady 62-68 m circle driven and mapped,
+// yet its raw triples alternate 42 / 174 / 76 m because ~1 m of digitising
+// wiggle on 13-17 m node spacing is a large local angle. The median of the
+// five triples around the anchor is immune to that alternation while still
+// reporting a genuinely sustained bend at full strength, so wherever the
+// noding is dense (every one of those five triples spans no more than
+// DENSE_TRIPLE_ARC of road) the published curvature is capped at
+// DENSE_CAP_FACTOR x that median. Sparse polylines - the under-noded bends
+// the peak-preserving max exists to rescue, noded 70 m apart - never satisfy
+// the arc gate and are left alone.
+const DENSE_TRIPLE_ARC = 45.0 // meters; all five triples must be at most this long
+const DENSE_CAP_FACTOR = 1.2  // slack over the median for short real features
+// End BluePilot
+
 // boundarySegmentLength returns the length (meters) of the way's traversal
 // segment adjacent to a chain boundary: the segment the chain leaves the way
 // on (entering=false) or enters it on (entering=true), given the way's
@@ -139,6 +329,12 @@ func GetStateCurvatures(state *State) ([]Curvature, error) {
 	all_nodes_direction := []bool{state.CurrentWay.OnWay.IsForward}
 	all_nodes_is_merge_or_split := []bool{false}
 	all_nodes_is_crossover := []bool{false}
+	// BluePilot: which chain entries are interchange connectors, for the
+	// per-point ramp lateral budget (see latBudget), and the loop-arc mean
+	// curvature for entries that are loop ramps (see loopMeanCurvature)
+	all_nodes_is_ramp := []bool{isRampWay(state.CurrentWay.Way)}
+	all_nodes_loop_curv := []float64{loopMeanCurvature(state.CurrentWay.Way)}
+	// End BluePilot
 	lastWay := state.CurrentWay.Way
 	for _, nextWay := range state.NextWays {
 		nwNodes, err := nextWay.Way.Nodes()
@@ -170,11 +366,22 @@ func GetStateCurvatures(state *State) ([]Curvature, error) {
 			boundarySegmentLength(lastWay, lastForward, false) < CROSSOVER_MAX_BOUNDARY_SEGMENT &&
 			boundarySegmentLength(nextWay.Way, nextWay.IsForward, true) < CROSSOVER_MAX_BOUNDARY_SEGMENT
 		all_nodes_is_crossover = append(all_nodes_is_crossover, isCrossover)
+		// BluePilot
+		all_nodes_is_ramp = append(all_nodes_is_ramp, isRampWay(nextWay.Way))
+		all_nodes_loop_curv = append(all_nodes_loop_curv, loopMeanCurvature(nextWay.Way))
+		// End BluePilot
 		lastWay = nextWay.Way
 	}
 
 	x_points := make([]float64, num_points)
 	y_points := make([]float64, num_points)
+	// BluePilot: per-point ramp flag, taken from the chain entry each point is
+	// copied out of (a shared boundary node takes the entry that owns it in
+	// the concatenation; one node of slack either way does not matter to a
+	// budget that changes by way, not by node)
+	point_is_ramp := make([]bool, num_points)
+	point_loop_curv := make([]float64, num_points)
+	// End BluePilot
 
 	merge_or_split_nodes := []int{}
 	crossover_nodes := []int{}
@@ -197,6 +404,10 @@ func GetStateCurvatures(state *State) ([]Curvature, error) {
 		node := all_nodes[all_nodes_idx].At(index)
 		x_points[i] = node.Latitude()
 		y_points[i] = node.Longitude()
+		// BluePilot
+		point_is_ramp[i] = all_nodes_is_ramp[all_nodes_idx]
+		point_loop_curv[i] = all_nodes_loop_curv[all_nodes_idx]
+		// End BluePilot
 
 		nodes_idx += 1
 		if nodes_idx == all_nodes[all_nodes_idx].Len() || (nodes_idx == all_nodes[all_nodes_idx].Len()-1 && all_nodes_idx > 0) {
@@ -215,6 +426,37 @@ func GetStateCurvatures(state *State) ([]Curvature, error) {
 	if err != nil {
 		return []Curvature{}, errors.Wrap(err, "could not get curvatures from points")
 	}
+
+	// BluePilot: per-triple dense-noding cap (see DENSE_TRIPLE_ARC). For each
+	// curvature sample k, the cap is DENSE_CAP_FACTOR x median of the raw
+	// triples k-1..k+1, valid only when all three exist and all are short.
+	dense_cap := make([]float64, len(curvatures))
+	for k := range dense_cap {
+		dense_cap[k] = math.Inf(1)
+		if k < 1 || k+1 >= len(curvatures) {
+			continue
+		}
+		dense := true
+		var three [3]float64
+		for m := 0; m < 3; m++ {
+			// A triple the merge/split or crossover passes flattened is not
+			// evidence about the road: the jogs those passes suppress are
+			// exactly the short segments that would fake "dense noding" here,
+			// and their flattened values would drag the median under a real
+			// curve sitting right next to the jog (the 31st Ave N crest).
+			if arc_lengths[k-1+m] > DENSE_TRIPLE_ARC || curvatures[k-1+m] == FLATTENED_CURVATURE {
+				dense = false
+				break
+			}
+			three[m] = curvatures[k-1+m]
+		}
+		if !dense {
+			continue
+		}
+		sort.Float64s(three[:])
+		dense_cap[k] = DENSE_CAP_FACTOR * three[1]
+	}
+	// End BluePilot
 
 	// set the merge nodes to be straight to help balance out issues with map representation
 	for _, merge_or_split_node := range merge_or_split_nodes {
@@ -298,6 +540,35 @@ func GetStateCurvatures(state *State) ([]Curvature, error) {
 		if raw >= MIN_PEAK_CURVATURE && arc >= MIN_PEAK_ARC && arc*arc*raw/8 >= MIN_PEAK_SAGITTA {
 			published_curvatures[i] = math.Max(published_curvatures[i], raw)
 		}
+
+		// BluePilot: where the noding is dense enough for the three-triple
+		// median to be trusted, the preserved PEAK may not claim the road
+		// turns much harder than its neighbourhood sustains - but the cap is
+		// floored at the arc-weighted average, because the average is already
+		// the anti-noise estimate and near suppressed jogs the raw
+		// neighbourhood under-reads (the sharp part of the 31st Ave N crest
+		// lives in triples the crossover pass deliberately flattened). Net
+		// effect: the cap can only strip the raw-peak excess, never cut into
+		// what the averaging itself published. This is what stops a 65 m loop
+		// mapped with 13-17 m nodes from publishing a 42 m phantom (a 24 mph
+		// target on a loop humans drive at 34), while sparse under-noded bends
+		// and jog-adjacent curves keep their published values.
+		if cap := math.Max(average_curvatures[i], dense_cap[i+1]); published_curvatures[i] > cap {
+			published_curvatures[i] = cap
+		}
+
+		// Loop-arc clamp (see loopMeanCurvature): points on a loop ramp are
+		// banded around the way's mean sweep curvature. Applied last: the
+		// design geometry of the coil outranks every local estimate on it.
+		if mean := point_loop_curv[i+2]; mean > 0 {
+			if hi := LOOP_CURV_CAP * mean; published_curvatures[i] > hi {
+				published_curvatures[i] = hi
+			}
+			if lo := LOOP_CURV_FLOOR * mean; published_curvatures[i] >= LOOP_FLOOR_GATE*mean && published_curvatures[i] < lo {
+				published_curvatures[i] = lo
+			}
+		}
+		// End BluePilot
 	}
 
 	// BluePilot: post-average boundary suppression. Flattening the INPUT
@@ -333,6 +604,10 @@ func GetStateCurvatures(state *State) ([]Curvature, error) {
 		curvature_outputs[i].Curvature = curvature
 		curvature_outputs[i].Latitude = x_points[i+2]
 		curvature_outputs[i].Longitude = y_points[i+2]
+		// BluePilot: carries the per-way lateral-budget context to
+		// GetTargetVelocities; never serialized
+		curvature_outputs[i].IsRamp = point_is_ramp[i+2]
+		// End BluePilot
 	}
 	return curvature_outputs, nil
 }
@@ -349,7 +624,18 @@ func GetTargetVelocities(curvatures []Curvature) []Velocity {
 		if curv.Curvature == 0 {
 			continue
 		}
-		velocities[i].Velocity = math.Pow(TARGET_LAT_ACCEL/curv.Curvature, 1.0/2)
+		// BluePilot: the budget depends on the speed the curve is taken at,
+		// so v = sqrt(a(v) * R) is implicit. a(v) is mild and decreasing, so
+		// fixed-point iteration from the anchor-budget seed settles in a few
+		// rounds (each step moves less than the one before; four rounds land
+		// within ~0.1 m/s everywhere in the table's range).
+		radius := 1.0 / curv.Curvature
+		v := math.Sqrt(TARGET_LAT_ACCEL * radius)
+		for iter := 0; iter < 4; iter++ {
+			v = math.Sqrt(latBudget(v, curv.IsRamp) * radius)
+		}
+		velocities[i].Velocity = v
+		// End BluePilot
 		velocities[i].Latitude = curv.Latitude
 		velocities[i].Longitude = curv.Longitude
 	}
