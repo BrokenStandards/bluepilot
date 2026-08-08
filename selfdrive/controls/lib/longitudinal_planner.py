@@ -61,8 +61,12 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     self.prev_accel_clip = [ACCEL_MIN, ACCEL_MAX]
     self.output_a_target = 0.0
     self.output_should_stop = False
-    # BluePilot: jerk-limited floor for the e2e branch on gate engage (never applied to the mpc)
-    self._gate_slew_accel = None
+    # BluePilot: the rate-limited e2e branch of the model-decel gate (never applied to the
+    # mpc term); None whenever the gate is not participating, seeded at the live output on
+    # first participation so entry is always continuous. _gate_e2e_prev feeds the model's own
+    # per-frame fall through the down-limit (arbitration is paced, model braking is not).
+    self._gate_branch_accel = None
+    self._gate_e2e_prev = None
 
     self.v_desired_trajectory = np.zeros(CONTROL_N)
     self.a_desired_trajectory = np.zeros(CONTROL_N)
@@ -163,38 +167,74 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     output_should_stop_e2e = sm['modelV2'].action.shouldStop
 
     if self.is_e2e(sm):
-      # BluePilot: with the model-decel gate, the e2e accel participates only while the model
-      # expresses deceleration intent — otherwise the MPC drives, so a model plateauing at
-      # ~0.0 accel can never hold the car below the set/limit target. shouldStop stays OR'd
-      # regardless (it only fires near standstill and is the stop-hold latch).
-      gate_in = True
+      # BluePilot: with the model-decel gate, the e2e accel participates in the min() in
+      # PROPORTION to the model's deceleration intent — a model plateauing at ~0.0 accel can
+      # never hold the car below the set/limit target, while a model sinking toward the
+      # engage setpoint blends in smoothly instead of snapping between "MPC accelerating"
+      # and "full e2e deceleration" every time it hovers at the threshold (log-measured at
+      # 10.9 flips/min with +0.7 m/s^2 half-second swings on release). shouldStop stays
+      # OR'd regardless (it only fires near standstill and is the stop-hold latch).
       if self.model_decel_gate_enabled:
         model_v = sm['modelV2'].velocity.x
         model_end_v = model_v[len(model_v) - 1] if len(model_v) else v_ego
-        was_active = self.decel_gate.active
-        gate_in = self.decel_gate.update(output_a_target_e2e, bool(output_should_stop_e2e), model_end_v, v_ego)
-        if gate_in and not was_active:
-          # jerk-limit the engage step: floor the e2e branch at last frame's output, ramping
-          # down at 2.5 m/s^3. The mpc term is never floored — lead braking stays untouched.
-          self._gate_slew_accel = float(self.output_a_target)
+        self.decel_gate.update(output_a_target_e2e, bool(output_should_stop_e2e), model_end_v, v_ego)
+        gate_w = self.decel_gate.weight
+      else:
+        # gate feature off: stock e2e arbitration — full participation, no branch limiting
+        gate_w = None
 
-      if gate_in:
-        e2e_a_target = output_a_target_e2e
-        if self._gate_slew_accel is not None:
-          self._gate_slew_accel -= 2.5 * self.dt
-          if self._gate_slew_accel <= output_a_target_e2e:
-            self._gate_slew_accel = None
-          else:
-            e2e_a_target = self._gate_slew_accel
-        output_a_target = min(e2e_a_target, output_a_target_mpc)
+      if gate_w is None:
+        self._gate_branch_accel = None
+        output_a_target = min(output_a_target_e2e, output_a_target_mpc)
         if output_a_target < output_a_target_mpc:
           self.mpc.source = LongitudinalPlanSource.e2e
+      elif gate_w > 0.0 or self._gate_branch_accel is not None:
+        # the e2e branch, blended toward the MPC by how much of the ramp band the model's
+        # intent has crossed: at the engage setpoint (weight 1) this is exactly the old
+        # min(e2e, mpc); at the release threshold (weight 0) the branch equals the MPC and
+        # the min() is a no-op. In between, the maximum acceleration lowers smoothly.
+        #
+        # The branch is then rate-limited in ACCEL space, both directions. Replaying the
+        # blend without this showed why weight-space ramps alone are not enough: the blend's
+        # d(weight) * (e2e - mpc) term steps the branch by the full spread times the weight
+        # step, which on a wide spread is worse jerk than the binary gate ever produced.
+        # Seeded at the live output on first participation (the old engage slew generalized:
+        # entry is always continuous), falling at up to 2.5 m/s^3 (the engage rate this gate
+        # has always used) and rising at up to 1.5 m/s^3 — so the release hand-back is a
+        # comfort-jerk ramp instead of the old hold-then-snap, which log-measured at
+        # +0.7 m/s^2 inside half a second, 10.9 gate flips/min. The mpc term is never
+        # limited — lead braking stays untouched.
+        #
+        # The branch stays alive after the weight reaches zero until it has CONVERGED onto
+        # the MPC: dropping it at weight 0 with the up-ramp still in flight would snap the
+        # output by whatever gap remained (sim-measured at up to 17 m/s^3), exactly the
+        # discontinuity this exists to remove.
+        blend = gate_w * output_a_target_e2e + (1.0 - gate_w) * output_a_target_mpc
+        if self._gate_branch_accel is None:
+          self._gate_branch_accel = float(self.output_a_target)
+        # The down-step may always be at least the weight-scaled movement of the MODEL's own
+        # demand: the rate limit paces ARBITRATION transitions, never the model's braking
+        # dynamics. Without this, a hazard dive arriving mid-engagement (where the old code
+        # followed the model instantly) would be comfort-paced too — sim-measured 0.8 s
+        # later to full braking, which is the wrong direction to spend comfort budget.
+        e2e_fall = gate_w * max(0.0, self._gate_e2e_prev - output_a_target_e2e) \
+            if self._gate_e2e_prev is not None else 0.0
+        down_step = max(2.5 * self.dt, e2e_fall)
+        self._gate_branch_accel = float(np.clip(blend, self._gate_branch_accel - down_step,
+                                                self._gate_branch_accel + 1.5 * self.dt))
+        output_a_target = min(self._gate_branch_accel, output_a_target_mpc)
+        if output_a_target < output_a_target_mpc:
+          self.mpc.source = LongitudinalPlanSource.e2e
+        if gate_w == 0.0 and self._gate_branch_accel >= output_a_target_mpc:
+          self._gate_branch_accel = None
       else:
-        self._gate_slew_accel = None
+        self._gate_branch_accel = None
         output_a_target = output_a_target_mpc
+      self._gate_e2e_prev = float(output_a_target_e2e)
       self.output_should_stop = output_should_stop_e2e or output_should_stop_mpc
     else:
-      self._gate_slew_accel = None
+      self._gate_branch_accel = None
+      self._gate_e2e_prev = None
       output_a_target = output_a_target_mpc
       self.output_should_stop = output_should_stop_mpc
 

@@ -196,6 +196,7 @@ struct LongitudinalPlanSP @0xf35cc4560bbf6ec2 {
   e2eAlerts @7 :E2eAlerts;
   primaryLimiter @8 :PrimaryLimiter;  # BluePilot: which constraint produced this frame's accel target
   modelDecelGateActive @9 :Bool;  # BluePilot: e2e accel currently allowed into the min() (decel intent)
+  modelDecelGateWeight @10 :Float32;  # BluePilot: continuous e2e participation, 0 = MPC alone .. 1 = full min(e2e, mpc)
 
   enum PrimaryLimiter {
     none @0;

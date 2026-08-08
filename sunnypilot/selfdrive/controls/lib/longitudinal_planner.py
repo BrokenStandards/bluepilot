@@ -148,6 +148,7 @@ class LongitudinalPlannerSP:
     longitudinalPlanSP.aTarget = float(self.output_a_target)
     longitudinalPlanSP.primaryLimiter = self.primary_limiter
     longitudinalPlanSP.modelDecelGateActive = bool(self.model_decel_gate_enabled and self.decel_gate.active)
+    longitudinalPlanSP.modelDecelGateWeight = float(self.decel_gate.weight) if self.model_decel_gate_enabled else 0.0
     longitudinalPlanSP.events = self.events_sp.to_msg()
 
     # Dynamic Experimental Control
