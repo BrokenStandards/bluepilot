@@ -136,7 +136,11 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
       clipped_accel_coast_interp = np.interp(v_ego, [MIN_ALLOW_THROTTLE_SPEED, MIN_ALLOW_THROTTLE_SPEED*2], [accel_clip[1], clipped_accel_coast])
       accel_clip[1] = min(accel_clip[1], clipped_accel_coast_interp)
 
-    # Get new v_cruise and a_desired from Smart Cruise Control and Speed Limit Assist
+    # Get new v_cruise and a_desired from Smart Cruise Control and Speed Limit Assist.
+    # BluePilot: snapshot last frame's PUBLISHED accel first - update_targets overwrites the
+    # shared output_a_target attribute with the SP min-source's own value, so reading it later
+    # would seed the gate branch from that instead of from what the car was actually commanded.
+    prev_published_a_target = float(self.output_a_target)
     v_cruise, self.a_desired = LongitudinalPlannerSP.update_targets(self, sm, self.v_desired_filter.x, self.a_desired, v_cruise)
 
     if force_slow_decel:
@@ -185,6 +189,7 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
 
       if gate_w is None:
         self._gate_branch_accel = None
+        self.decel_gate.reset()
         output_a_target = min(output_a_target_e2e, output_a_target_mpc)
         if output_a_target < output_a_target_mpc:
           self.mpc.source = LongitudinalPlanSource.e2e
@@ -211,17 +216,24 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
         # discontinuity this exists to remove.
         blend = gate_w * output_a_target_e2e + (1.0 - gate_w) * output_a_target_mpc
         if self._gate_branch_accel is None:
-          self._gate_branch_accel = float(self.output_a_target)
+          self._gate_branch_accel = prev_published_a_target
         # The down-step may always be at least the weight-scaled movement of the MODEL's own
         # demand: the rate limit paces ARBITRATION transitions, never the model's braking
         # dynamics. Without this, a hazard dive arriving mid-engagement (where the old code
         # followed the model instantly) would be comfort-paced too — sim-measured 0.8 s
         # later to full braking, which is the wrong direction to spend comfort budget.
-        e2e_fall = gate_w * max(0.0, self._gate_e2e_prev - output_a_target_e2e) \
-            if self._gate_e2e_prev is not None else 0.0
+        e2e_fall = e2e_rise = 0.0
+        if self._gate_e2e_prev is not None:
+          e2e_fall = gate_w * max(0.0, self._gate_e2e_prev - output_a_target_e2e)
+          e2e_rise = gate_w * max(0.0, output_a_target_e2e - self._gate_e2e_prev)
         down_step = max(2.5 * self.dt, e2e_fall)
+        # the up-limit paces arbitration hand-backs only: a model recovering from its own
+        # braking faster than 1.5 m/s^3 (green light, aborted brake) must not leave the
+        # output braking below BOTH plan sources - review-measured 1.3 m/s of extra speed
+        # lost per aborted brake and a ~1 s slower green-light go without this
+        up_step = max(1.5 * self.dt, e2e_rise)
         self._gate_branch_accel = float(np.clip(blend, self._gate_branch_accel - down_step,
-                                                self._gate_branch_accel + 1.5 * self.dt))
+                                                self._gate_branch_accel + up_step))
         output_a_target = min(self._gate_branch_accel, output_a_target_mpc)
         if output_a_target < output_a_target_mpc:
           self.mpc.source = LongitudinalPlanSource.e2e
@@ -235,6 +247,7 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     else:
       self._gate_branch_accel = None
       self._gate_e2e_prev = None
+      self.decel_gate.reset()
       output_a_target = output_a_target_mpc
       self.output_should_stop = output_should_stop_mpc
 

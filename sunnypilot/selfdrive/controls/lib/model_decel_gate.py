@@ -18,18 +18,25 @@ lead-blind cruise plan), so it requires EVERY intent signal clear, sustained —
 positive excursions of the 0.3 s-smoothed model accel mid-stop cannot release because
 the model's 10 s plan-end speed stays collapsed through a genuine stop.
 
-The gate's PARTICIPATION is continuous, not binary (see weight). The binary form
-alternated between "MPC accelerating toward the target" and "full e2e deceleration"
-whenever the model hovered around a setpoint — log-measured at 10.9 flips/min on a real
-drive, with the release snap moving the plan accel up to +0.73 m/s^2 within half a
-second and 15 ten-second windows containing four or more flips. weight ramps across the
-SAME hysteresis bands the binary thresholds already define (so full-engage and
-full-release happen at exactly the points they always did): as model intent deepens from
-the release threshold toward the engage threshold, the planner's e2e branch blends in
-proportionally, smoothly lowering the maximum acceleration until, at the setpoint, the
-model has it all — the same shape the curve-speed profile uses to approach a curve.
-Weight RISES instantly (engage stays the safe direction) and FALLS rate-limited over the
-release window, so handing authority back to the cruise plan is a ramp, not a snap.
+The gate's PARTICIPATION is continuous, not binary (see weight) — but the weight is a
+shaped ENVELOPE of the binary state machine above, never an independent signal. The
+binary form alternated between "MPC accelerating toward the target" and "full e2e
+deceleration" whenever the model hovered around a setpoint — log-measured at
+10.9 flips/min on a real drive, with the release snap moving the plan accel up to
++0.73 m/s^2 within half a second. The weight smooths exactly those edges and nothing
+else: it rises over RISE_TIME when the binary engage condition fires (shouldStop takes
+it all immediately), HOLDS at its peak for as long as the machine is latched — inside
+the hysteresis band a model still expressing decel intent keeps every bit of the
+authority it had, exactly as the binary latch always guaranteed — and decays across the
+release window only on frames where EVERY intent signal reads clear, reaching the MPC by
+the time the machine deactivates. Below the engage setpoint the weight is zero, full
+stop: an adversarial review of a band-position variant (weight tracking how far into the
+hysteresis band the signals sat) showed why anything else is unsound — a model resting
+just above the engage threshold indefinitely would phantom-brake the car from cruise to
+a standstill, and a model easing mid-braking into the band would blend in enough of the
+lead-blind accelerating cruise plan to command net acceleration against live decel
+intent. The engage threshold exists to make sub-threshold intent a no-op; the envelope
+keeps it that way.
 """
 
 from openpilot.common.realtime import DT_MDL
@@ -86,68 +93,55 @@ class ModelDecelGate:
     self.end_v_margin = min(10.0, max(0.0, -end_v_delta))
     self.release_end_v_margin = self.end_v_margin / 2.0
 
-  def _target_weight(self, e2e_accel: float, e2e_should_stop: bool, model_end_v: float, v_ego: float) -> float:
-    """How much of the e2e branch the intent signals ask for right now, 0..1.
-
-    Each analog signal ramps linearly across its existing hysteresis band — from the
-    release threshold (0, exactly where the binary gate finishes releasing) to the engage
-    threshold (1, exactly where the binary gate engages) — and the signals combine by max,
-    so any one deep signal keeps full authority regardless of the others (mid-stop, brief
-    excursions of the smoothed model accel cannot lift the cap while the plan-end speed
-    stays collapsed). shouldStop is binary and demands everything.
-    """
-    if e2e_should_stop:
-      return 1.0
-
-    w = 0.0
-    band = self.release_accel - self.engage_accel  # = RELEASE_HYSTERESIS, always > 0
-    w = max(w, min(1.0, (self.release_accel - e2e_accel) / band))
-
-    if self.end_v_margin > 0.0:
-      sag = v_ego - model_end_v
-      v_band = self.end_v_margin - self.release_end_v_margin  # = margin/2, > 0 when enabled
-      w = max(w, min(1.0, (sag - self.release_end_v_margin) / v_band))
-
-    return max(0.0, w)
+  def reset(self) -> None:
+    """Forget everything. Called when the gate stops being consulted (leaving e2e mode,
+    feature toggled off): letting weight/active freeze published minutes-stale state and,
+    worse, resurrected stale participation into the plan on re-entry."""
+    self.active = False
+    self.weight = 0.0
+    self._release_counter = 0
 
   def update(self, e2e_accel: float, e2e_should_stop: bool, model_end_v: float, v_ego: float) -> bool:
-    # Continuous participation: both directions are rate-limited ramps (rise fast, fall over
-    # the release window — see RISE_TIME/RELEASE_TIME), except shouldStop, which is the
-    # stop-hold latch and takes everything immediately. The fall spans the same RELEASE_TIME
-    # the binary release already waits, so by the time the state machine below deactivates,
-    # the blend has already reached the MPC and deactivation changes nothing.
-    target = self._target_weight(e2e_accel, e2e_should_stop, model_end_v, v_ego)
-    if e2e_should_stop:
-      self.weight = 1.0
-    elif target >= self.weight:
-      self.weight = min(target, self.weight + self._dt / RISE_TIME)
-    else:
-      release_time = RELEASE_TIME_LOW_SPEED if v_ego < LOW_SPEED else RELEASE_TIME
-      self.weight = max(target, self.weight - self._dt / release_time)
-    if self.weight < WEIGHT_EPS:
-      self.weight = 0.0
-
     decel_intent = (e2e_should_stop or
                     e2e_accel < self.engage_accel or
                     model_end_v < v_ego - self.end_v_margin)
+    all_clear = (not e2e_should_stop and
+                 e2e_accel > self.release_accel and
+                 model_end_v > v_ego - self.release_end_v_margin)
+    release_time = RELEASE_TIME_LOW_SPEED if v_ego < LOW_SPEED else RELEASE_TIME
 
+    # ---- binary state machine (unchanged semantics; still the published state) ----
     if decel_intent:
       self.active = True
       self._release_counter = 0
-      return self.active
-
-    if self.active:
-      all_clear = (not e2e_should_stop and
-                   e2e_accel > self.release_accel and
-                   model_end_v > v_ego - self.release_end_v_margin)
+    elif self.active:
       if all_clear:
         self._release_counter += 1
-        release_time = RELEASE_TIME_LOW_SPEED if v_ego < LOW_SPEED else RELEASE_TIME
         if self._release_counter >= int(release_time / self._dt):
           self.active = False
           self._release_counter = 0
       else:
         # in the hysteresis band between engage and release thresholds: hold the gate
         self._release_counter = 0
+
+    # ---- continuous participation: a shaped envelope of the machine above ----
+    # Rise over RISE_TIME while the engage condition holds (shouldStop immediately - the
+    # stop-hold latch takes everything); HOLD while latched in the hysteresis band, so a
+    # model easing mid-braking keeps full authority exactly as the binary latch promised;
+    # decay across the release window only on all-clear frames, so the hand-back to the
+    # cruise plan is a ramp that completes as the machine deactivates. Note the decay
+    # integrates CUMULATIVE clear time where the binary counter demands it consecutive:
+    # band frames between clear runs hold the weight (never refill it), so flickering
+    # intent releases no faster than sustained-clear intent, just not slower.
+    if e2e_should_stop:
+      self.weight = 1.0
+    elif decel_intent:
+      self.weight = min(1.0, self.weight + self._dt / RISE_TIME)
+    elif self.active and not all_clear:
+      pass  # latched in-band: hold
+    else:
+      self.weight = max(0.0, self.weight - self._dt / release_time)
+      if self.weight < WEIGHT_EPS:
+        self.weight = 0.0
 
     return self.active
