@@ -17,6 +17,7 @@ from openpilot.sunnypilot.selfdrive.controls.lib.smart_cruise_control import MIN
 from openpilot.sunnypilot.selfdrive.controls.lib.smart_cruise_control.vision_controller import (
   SmartCruiseControlVision,
   _ENTERING_PRED_LAT_ACC_TH,
+  _NO_OVERSHOOT_TIME_HORIZON,
   _TURNING_ACC_BP,
   _TURNING_ACC_V,
 )
@@ -231,6 +232,37 @@ class TestSmartCruiseControlVision:
     assert all(v <= 0.0 for v in _TURNING_ACC_V)
     # np.interp clamps below the first breakpoint, so the whole >= 1.5 domain is covered by the table
     assert float(np.interp(0.0, _TURNING_ACC_BP, _TURNING_ACC_V)) <= 0.0
+
+  # MIN_V bounds what this source PUBLISHES. The floor used to be applied before the
+  # a_target * _NO_OVERSHOOT_TIME_HORIZON subtraction, so a negative a_target carried the
+  # published value straight through it - observed once in 4385 engaged frames of logged
+  # driving, publishing 8.99 mph (4.02 m/s) against a 5.56 m/s floor, while governing.
+  @pytest.mark.parametrize("v_target, a_target", [
+    (MIN_V + 4.0, -1.0),   # the logged shape: above the floor before, under it after
+    (MIN_V, -1.0),         # exactly at the floor before
+    (MIN_V - 2.0, -0.2),   # already under the floor before
+    (MIN_V + 10.0, -1.0),  # comfortably clear, floor must not bind
+    (MIN_V + 1.0, 0.5),    # LEAVING: positive projection, floor must not bind
+  ])
+  def test_published_target_is_never_below_min_v(self, v_target, a_target):
+    self.scc_v.state = VisionState.turning
+    self.scc_v.is_active = True
+    self.scc_v.v_target = v_target
+    self.scc_v.a_target = a_target
+
+    published = self.scc_v.get_v_target_from_control()
+
+    assert published >= MIN_V - 1e-9, f"published {published} m/s is below the {MIN_V} m/s floor"
+    # and where the floor does not bind, the projection is still applied in full
+    unfloored = v_target + a_target * _NO_OVERSHOOT_TIME_HORIZON
+    if unfloored >= MIN_V:
+      assert published == pytest.approx(unfloored)
+
+  def test_inactive_still_publishes_unset(self):
+    self.scc_v.is_active = False
+    self.scc_v.v_target = 1.0
+    self.scc_v.a_target = -1.0
+    assert self.scc_v.get_v_target_from_control() == V_CRUISE_UNSET
   # End BluePilot
 
   # TODO-SP: mock modelV2 data to test other states

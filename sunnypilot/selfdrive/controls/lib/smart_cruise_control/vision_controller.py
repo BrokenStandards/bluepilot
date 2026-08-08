@@ -29,6 +29,36 @@ _FINISH_LAT_ACC_TH = 1.1  # Lat Acc threshold to trigger the end of the turn cyc
 
 _A_LAT_REG_MAX = 2.  # Maximum lateral acceleration
 
+# BluePilot: what this constant actually means, measured - because three things about it are
+# not what they look like, and a review of 4385 engaged frames of real driving (five rlog
+# segments, one city route, CurveSpeedProfile=Comfort) got two of them wrong before the data
+# settled it.
+#
+# 1. BASIS. This budget is applied to the MODEL'S PREDICTED PATH (orientationRate.z *
+#    velocity.x), not to the OSM centreline the map source's anchors were fitted against. The
+#    intuition that the driven line is 35-50% wider - so that 2.0 here would be a far more
+#    permissive ~2.8 on the map's scale - does NOT hold: measured over 1049 frames where both
+#    sources published, the conversion is ~1.05-1.10, so 2.0 here is a map anchor equivalent
+#    of about 2.16 (p25 1.75, p75 2.43). Frame-by-frame the model's predicted curvature is a
+#    median 1.11x the curvature actually driven; the wider-line figure came from comparing
+#    minima of noisy per-corner estimates.
+# 2. IT IS NOT THE ENFORCED BUDGET. What this source publishes is not sqrt(_A_LAT_REG_MAX * R):
+#    get_v_target_from_control subtracts a_target * _NO_OVERSHOOT_TIME_HORIZON, which supplies
+#    essentially the whole margin by which vision undercuts the map (p50 3.27 mph of a p50
+#    3.16 mph margin). The EFFECTIVE published budget is a map-anchor equivalent of 1.81
+#    (p25 1.43, p75 2.19) - inside the measured human p25-p50 band, and slightly above a
+#    Comfort map. Strip the horizon term and this source sits a median 2.78 mph ABOVE the map
+#    and stops participating. So do not "correct" 2.0 against the map's anchors as though the
+#    two were the same quantity; on the drive that was measured, the published behaviour is
+#    already human-band and the constant needs no retune in either direction.
+# 3. IT IS NOT PROFILE-AWARE. This controller reads no param but SmartCruiseControlVision, so
+#    CurveSpeedProfile (Comfort/Normal/Sport) is inert wherever vision wins the planner's
+#    min() - 13.3% of engaged frames at Comfort, rising to a simulated 22.8% at Sport, because
+#    a fixed ceiling clips a raised map anchor more often. Known and deliberate for now: making
+#    it profile-aware was simulated and, at Comfort, made a drive the owner liked measurably
+#    slower (+26% integrated target suppression). Revisit with a Sport drive to validate against.
+# End BluePilot
+
 _NO_OVERSHOOT_TIME_HORIZON = 4.  # s. Time to use for velocity desired based on a_target when not overshooting.
 
 # Lookup table for the minimum smooth deceleration during the ENTERING state
@@ -77,7 +107,17 @@ class SmartCruiseControlVision:
 
   def get_v_target_from_control(self) -> float:
     if self.is_active:
-      return max(self.v_target, MIN_V) + self.a_target * _NO_OVERSHOOT_TIME_HORIZON
+      # BluePilot: floor the PUBLISHED value, not the pre-projection one. MIN_V exists so this
+      # source never governs below 20 km/h, but applying it before subtracting
+      # a_target * _NO_OVERSHOOT_TIME_HORIZON left the floor bounding a quantity that is not
+      # what gets published: with a_target near its -1.0 limit the 5.56 m/s floor became
+      # 1.56 m/s (3.5 mph). Seen once in 4385 engaged frames of logged driving, and it governed
+      # the planner on that frame - v_target 14.05 mph, already above the floor, published as
+      # 8.99 mph. The map source already floors after its own slew (get_v_target_from_control
+      # there ends `return max(new, MIN_V)`). This can only ever raise the published target, so
+      # it cannot make the car slower on any frame.
+      return max(self.v_target + self.a_target * _NO_OVERSHOOT_TIME_HORIZON, MIN_V)
+      # End BluePilot
 
     return V_CRUISE_UNSET
 
