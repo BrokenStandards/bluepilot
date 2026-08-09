@@ -247,13 +247,29 @@ class TestModelDecelGate:
     cap = gate.pre_engage_cap(mid, 0.8)
     assert cap is not None and abs(cap - (0.5 * mid + 0.5 * 0.8)) < 1e-9
 
-  def test_pre_cap_never_commands_braking(self):
-    # THE guard: unfloored, a model resting deep in the band computes a slightly negative
-    # cap and creeps the car to a standstill (sim: 10.4 m/s -> 0 in under two minutes)
+  def test_pre_cap_never_commands_braking_by_default(self):
+    # the default floor: a model resting deep in the band must not creep the car down
+    # (unfloored sim worst case: 10.4 m/s -> 0 in under two minutes at band 0.10)
     gate = ModelDecelGate(DT)
     for e2e in (-0.16, -0.18, -0.19, -0.199):
       cap = gate.pre_engage_cap(e2e, 0.8)
       assert cap is not None and cap >= 0.0, f"cap {cap} at e2e {e2e} commands braking pre-engagement"
+
+  def test_pre_cap_unfloored_follows_the_blend_below_zero(self):
+    # on-road test option: with the floor off the cap IS the taper blend, so the model's
+    # gentle proto-braking acts before the gate engages
+    gate = ModelDecelGate(DT)
+    gate.set_pre_floor(False)
+    for e2e in (-0.18, -0.19, -0.199):
+      f = min(1.0, ((gate.engage_accel + gate.pre_band) - e2e) / gate.pre_band)
+      expect = f * e2e + (1.0 - f) * 0.8
+      cap = gate.pre_engage_cap(e2e, 0.8)
+      assert cap is not None and abs(cap - expect) < 1e-9
+    assert gate.pre_engage_cap(-0.199, 0.8) < 0.0  # deep in the band it may brake gently
+    # outside the band the ramp still does not exist, floored or not
+    assert gate.pre_engage_cap(0.0, 0.8) is None
+    gate.set_pre_floor(True)
+    assert gate.pre_engage_cap(-0.199, 0.8) >= 0.0  # toggling back restores the floor
 
   def test_pre_cap_disabled_at_zero_band(self):
     gate = ModelDecelGate(DT)

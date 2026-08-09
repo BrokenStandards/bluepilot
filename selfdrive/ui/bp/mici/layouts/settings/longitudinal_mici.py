@@ -31,6 +31,9 @@ class LongitudinalLayoutMici(NavScroller):
     self.model_decel_gate_pre_band = BigParamFloatControl(
       "Decel Gate Pre-Ramp Band (m/s²)", "BPModelDecelGatePreBand", min=0.00, max=0.30, step=0.01,
     )
+    self.model_decel_gate_pre_floor = BigParamControlBP(
+      "Decel Gate Pre-Ramp Floor (Hold Speed Only)", "BPModelDecelGatePreFloor",
+    )
     self.limiter_window = BigParamFloatControl(
       "Controller Icons Window (s)", "BPLimiterWindow", min=0.0, max=5.0, step=0.1,
     )
@@ -44,6 +47,7 @@ class LongitudinalLayoutMici(NavScroller):
       self.model_decel_gate_accel,
       self.model_decel_gate_end_v,
       self.model_decel_gate_pre_band,
+      self.model_decel_gate_pre_floor,
       self.long_target_hud,
       self.limiter_window,
     ])
@@ -53,6 +57,7 @@ class LongitudinalLayoutMici(NavScroller):
       ("disable_downhill_comp_UI", self.disable_downhill_comp),
       ("disable_ford_radar_UI", self.disable_ford_radar),
       ("BPModelDecelGate", self.model_decel_gate),
+      ("BPModelDecelGatePreFloor", self.model_decel_gate_pre_floor),
       ("BPLongitudinalTargetHUD", self.long_target_hud),
     )
 

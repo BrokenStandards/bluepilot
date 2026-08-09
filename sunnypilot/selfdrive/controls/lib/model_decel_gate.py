@@ -81,10 +81,23 @@ WEIGHT_EPS = 1e-6         # snap-to-zero: decay must terminate exactly, not asym
 # hover scenario's mean speed down. User-adjustable via BPModelDecelGatePreBand; 0 disables.
 PRE_ENGAGE_BAND = 0.05    # m/s^2 above the engage threshold where the taper begins
 
+# Whether the pre-threshold cap is floored at zero. Floored (default), the ramp may stop
+# the car accelerating but never commands braking below the setpoint; unfloored, the cap
+# follows its blend below zero, so the model's gentle proto-braking acts BEFORE the gate
+# engages. The floor exists because of a synthetic worst case (a model pinned just above
+# the setpoint indefinitely bleeds speed without bound - sim: 10.4 m/s to 0 in under two
+# minutes at band 0.10), but that input matches nothing in the logged drives (cruise e2e
+# sits below -0.2 on 1.2% of frames, never below -0.25, and never sustained), and the
+# integrated route sims can't resolve how the REAL model behaves in the band - only a
+# vehicle can. So both behaviors ship as options (BPModelDecelGatePreFloor, default on)
+# for on-road evaluation on empty roads.
+PRE_ENGAGE_FLOOR = True
+
 
 class ModelDecelGate:
   def __init__(self, dt: float = DT_MDL, engage_accel: float = ENGAGE_ACCEL,
-               end_v_margin: float = ENGAGE_END_V_MARGIN, pre_band: float = PRE_ENGAGE_BAND):
+               end_v_margin: float = ENGAGE_END_V_MARGIN, pre_band: float = PRE_ENGAGE_BAND,
+               pre_floor: bool = PRE_ENGAGE_FLOOR):
     self._dt = dt
     self._release_counter = 0
     self.active = False
@@ -92,6 +105,7 @@ class ModelDecelGate:
     self.set_engage_accel(engage_accel)
     self.set_end_v_margin(-end_v_margin)
     self.set_pre_band(pre_band)
+    self.set_pre_floor(pre_floor)
 
   def set_engage_accel(self, engage_accel: float) -> None:
     # different models brake with different strength; the threshold is user-adjustable so
@@ -108,23 +122,28 @@ class ModelDecelGate:
   def set_pre_band(self, pre_band: float) -> None:
     self.pre_band = min(0.3, max(0.0, pre_band))
 
+  def set_pre_floor(self, pre_floor: bool) -> None:
+    self.pre_floor = bool(pre_floor)
+
   def pre_engage_cap(self, e2e_accel: float, unrestricted_accel: float) -> float | None:
     """The pre-threshold ramp (see PRE_ENGAGE_BAND): the acceleration the planner may
     allow while the model's accel sits inside the pre-band. Tapers linearly from
-    unrestricted at engage+band to the model's own demand at the engage threshold, and is
-    FLOORED AT ZERO: pre-engagement the ramp may stop the car accelerating (hold speed)
-    but never command braking - unfloored, a model resting anywhere deep in the band
-    computes a slightly negative cap and creeps the car to a standstill (sim: 10.4 m/s to
-    0 in under two minutes), the same unbounded phantom braking the adversarial review
-    disqualified in the band-weight design. Braking begins only past the setpoint, where
-    the gate engages and the model is fed directly. None when not in the band."""
+    unrestricted at engage+band to the model's own demand at the engage threshold.
+
+    Floored at zero by default (see PRE_ENGAGE_FLOOR): the ramp may stop the car
+    accelerating (hold speed) but never command braking pre-engagement, so a model
+    resting in the band cannot bleed speed without bound; braking then begins only past
+    the setpoint, where the gate engages and the model is fed directly. With the floor
+    off (on-road test option) the cap follows its blend below zero, letting the model's
+    gentle proto-braking act before the gate ever engages. None when not in the band."""
     if self.pre_band <= 0.0:
       return None
     pre = self.engage_accel + self.pre_band
     if e2e_accel >= pre:
       return None
     f = min(1.0, (pre - e2e_accel) / self.pre_band)
-    return max(0.0, f * e2e_accel + (1.0 - f) * unrestricted_accel)
+    cap = f * e2e_accel + (1.0 - f) * unrestricted_accel
+    return max(0.0, cap) if self.pre_floor else cap
 
   def reset(self) -> None:
     """Forget everything. Called when the gate stops being consulted (leaving e2e mode,
