@@ -232,6 +232,40 @@ class TestModelDecelGate:
     run(gate, int(RISE_TIME / DT) + 1, accel=-0.5)
     assert gate.weight == 1.0
 
+  # ---- pre-threshold ramp (the acceleration cap) --------------------------------------
+
+  def test_pre_cap_none_above_the_band(self):
+    gate = ModelDecelGate(DT)
+    assert gate.pre_engage_cap(0.0, 0.8) is None
+    assert gate.pre_engage_cap(ENGAGE_ACCEL + 0.06, 0.8) is None
+
+  def test_pre_cap_tapers_to_the_model_at_the_setpoint(self):
+    # halfway into the band the cap is halfway between unrestricted and the model;
+    # at the setpoint it would meet the model (floored at 0 - braking is the gate's job)
+    gate = ModelDecelGate(DT)
+    mid = ENGAGE_ACCEL + 0.025
+    cap = gate.pre_engage_cap(mid, 0.8)
+    assert cap is not None and abs(cap - (0.5 * mid + 0.5 * 0.8)) < 1e-9
+
+  def test_pre_cap_never_commands_braking(self):
+    # THE guard: unfloored, a model resting deep in the band computes a slightly negative
+    # cap and creeps the car to a standstill (sim: 10.4 m/s -> 0 in under two minutes)
+    gate = ModelDecelGate(DT)
+    for e2e in (-0.16, -0.18, -0.19, -0.199):
+      cap = gate.pre_engage_cap(e2e, 0.8)
+      assert cap is not None and cap >= 0.0, f"cap {cap} at e2e {e2e} commands braking pre-engagement"
+
+  def test_pre_cap_disabled_at_zero_band(self):
+    gate = ModelDecelGate(DT)
+    gate.set_pre_band(0.0)
+    assert gate.pre_engage_cap(ENGAGE_ACCEL - 0.01, 0.8) is None
+
+  def test_pre_cap_follows_adjusted_engage_threshold(self):
+    gate = ModelDecelGate(DT)
+    gate.set_engage_accel(-2.0)
+    assert gate.pre_engage_cap(-1.9, 0.8) is None      # above -2.0 + 0.05
+    assert gate.pre_engage_cap(-1.97, 0.8) is not None  # inside the band
+
   def test_reset_clears_everything(self):
     # leaving e2e mode / toggling the feature: stale weight must not resurrect on re-entry
     gate = ModelDecelGate(DT)

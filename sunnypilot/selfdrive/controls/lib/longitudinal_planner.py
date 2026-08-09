@@ -130,6 +130,7 @@ class LongitudinalPlannerSP:
       try:
         self.decel_gate.set_engage_accel(float(self._params_sp.get("BPModelDecelGateAccel", return_default=True)))
         self.decel_gate.set_end_v_margin(float(self._params_sp.get("BPModelDecelGateEndV", return_default=True)))
+        self.decel_gate.set_pre_band(float(self._params_sp.get("BPModelDecelGatePreBand", return_default=True)))
       except (TypeError, ValueError):
         pass
 
